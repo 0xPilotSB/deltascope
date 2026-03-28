@@ -15,11 +15,21 @@ const PROMPT_PRESETS = [
   { label: "Search Feed", prompt: "Search for Pyth price feeds related to " },
 ];
 
+function getSecureRandomString(length: number): string {
+  if (typeof window !== "undefined" && window.crypto && window.crypto.getRandomValues) {
+    const array = new Uint32Array(length);
+    window.crypto.getRandomValues(array);
+    return Array.from(array, (value) => value.toString(36)).join("").slice(0, length);
+  }
+  // Fallback: should rarely be used in modern browsers; retained for robustness
+  return Math.random().toString(36).slice(2, 2 + length);
+}
+
 function getSessionId(): string {
   if (typeof window === "undefined") return "ssr";
   let id = sessionStorage.getItem("oracle-chat-session");
   if (!id) {
-    id = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    id = `chat-${Date.now()}-${getSecureRandomString(7)}`;
     sessionStorage.setItem("oracle-chat-session", id);
   }
   return id;
