@@ -18,17 +18,24 @@ import { DurableObject } from "cloudflare:workers";
  */
 
 // ─── Pyth Pro (Lazer) Feed IDs ────────────────────────────
+// Source: https://pyth.dourolabs.app/v1/symbols
+// All feeds use exponent -8
 
 const PYTH_PRO_IDS: Record<string, number> = {
-  BTC: 1,
-  ETH: 2,
-  SOL: 6,
-  HYPE: 110,
-  ARB: 37,
-  DOGE: 13,
-  AVAX: 18,
-  LINK: 19,
+  BTC: 1,    // min_channel: real_time
+  ETH: 2,    // min_channel: real_time
+  SOL: 6,    // min_channel: real_time
+  HYPE: 110, // min_channel: fixed_rate@200ms
+  ARB: 37,   // min_channel: fixed_rate@200ms
+  DOGE: 13,  // min_channel: fixed_rate@200ms
+  AVAX: 18,  // min_channel: fixed_rate@200ms
+  LINK: 19,  // min_channel: fixed_rate@200ms
 };
+
+// Feeds that support real_time channel (sub-50ms)
+const PYTH_PRO_REALTIME_IDS: number[] = [1, 2, 6]; // BTC, ETH, SOL
+// Feeds that require fixed_rate@200ms minimum
+const PYTH_PRO_FIXED_IDS: number[] = [110, 37, 13, 18, 19]; // HYPE, ARB, DOGE, AVAX, LINK
 
 // ─── Pyth Hermes (free) Feed IDs (fallback) ──────────────
 
@@ -317,14 +324,18 @@ export class PriceAggregator extends DurableObject<Env> {
 
     // Parallel initialization: fetch data + connect WebSockets simultaneously
     if (this.usingPythPro) {
+      // Pyth Pro (Lazer): connect to all 3 endpoints for redundancy
+      // Uses real_time channel for BTC/ETH/SOL, fixed_rate@200ms for others
       for (let i = 0; i < 3; i++) {
         this.connectPythPro(i, token);
       }
+      // Also keep Hermes WS as fallback in case Lazer goes down
+      this.connectPythHermes("https://hermes.pyth.network/ws", false);
     } else {
       // Dual Hermes: connect to both main and beta for lowest latency
       this.connectPythHermes("https://hermes.pyth.network/ws", false);
       this.connectPythHermes("https://hermes-beta.pyth.network/ws", true);
-      // REST polling supplement: poll every 2s for freshest data
+      // REST polling supplement: poll every 1s for freshest data
       this.startPythRestPoll();
     }
     this.connectHlWs();
@@ -383,22 +394,42 @@ export class PriceAggregator extends DurableObject<Env> {
       this.pythProConnected[idx] = true;
       this.reconnectAttempts[idx] = 0;
 
-      // Subscribe to all feeds with real_time channel
+      // Subscription 1: real_time channel for BTC, ETH, SOL (sub-50ms)
       ws.send(JSON.stringify({
         type: "subscribe",
-        subscriptionId: idx + 1,
-        priceFeedIds: Object.values(PYTH_PRO_IDS),
+        subscriptionId: idx * 10 + 1,
+        priceFeedIds: PYTH_PRO_REALTIME_IDS,
         properties: [
           "price",
-          "confidence",
           "bestBidPrice",
           "bestAskPrice",
-          "publisherCount",
           "exponent",
           "feedUpdateTimestamp",
         ],
         formats: [],
         channel: "real_time",
+        deliveryFormat: "json",
+        jsonBinaryEncoding: "hex",
+        ignoreInvalidFeeds: true,
+      }));
+
+      // Subscription 2: fixed_rate@200ms for HYPE, ARB, DOGE, AVAX, LINK
+      ws.send(JSON.stringify({
+        type: "subscribe",
+        subscriptionId: idx * 10 + 2,
+        priceFeedIds: PYTH_PRO_FIXED_IDS,
+        properties: [
+          "price",
+          "bestBidPrice",
+          "bestAskPrice",
+          "exponent",
+          "feedUpdateTimestamp",
+        ],
+        formats: [],
+        channel: "fixed_rate@200ms",
+        deliveryFormat: "json",
+        jsonBinaryEncoding: "hex",
+        ignoreInvalidFeeds: true,
       }));
 
       ws.addEventListener("message", (event) => {
@@ -443,14 +474,14 @@ export class PriceAggregator extends DurableObject<Env> {
           const st = this.state.get(symbol);
           if (!st) continue;
 
-          const expo = feed.exponent ?? st.pythExpo;
+          // Lazer uses exponent -8 for all crypto feeds
+          // Price is a string integer that needs exponent applied
+          const expo = feed.exponent ?? -8;
           const mult = this.pow10(expo);
 
           if (feed.price !== undefined) st.pythPrice = Number(feed.price) * mult;
-          if (feed.confidence !== undefined) st.pythConfidence = Number(feed.confidence) * mult;
           if (feed.bestBidPrice !== undefined) st.bestBidPrice = Number(feed.bestBidPrice) * mult;
           if (feed.bestAskPrice !== undefined) st.bestAskPrice = Number(feed.bestAskPrice) * mult;
-          if (feed.publisherCount !== undefined) st.publisherCount = feed.publisherCount;
           if (feed.exponent !== undefined) st.pythExpo = feed.exponent;
           if (feed.feedUpdateTimestamp !== undefined) st.pythPublishTime = feed.feedUpdateTimestamp;
           this.dirtyAssets.add(symbol);
