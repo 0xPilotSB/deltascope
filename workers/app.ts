@@ -109,21 +109,51 @@ export default {
     }
 
     // ─── REST API endpoints → route to PriceAggregator DO ───
+    // Edge-cached via CF Cache API to avoid DO round-trip on every request.
+    // The DO is smart-placed near upstream APIs (Pyth/HL), which is optimal
+    // for upstream latency but means user→DO round-trip is high.
+    // Edge caching serves responses from the nearest CF PoP instead.
     const id = env.PRICE_AGGREGATOR.idFromName("global");
+    const cache = caches.default;
 
     if (url.pathname === "/api/prices") {
+      // Check edge cache first (keyed by URL, per-PoP)
+      const cacheKey = new Request(request.url, { method: "GET" });
+      let cached = await cache.match(cacheKey);
+      if (cached) return addSecurityHeaders(cached);
+
       const stub = env.PRICE_AGGREGATOR.get(id);
-      return addSecurityHeaders(await stub.fetch(new Request(new URL("/prices", request.url), { headers: request.headers })));
+      const res = await stub.fetch(new Request(new URL("/prices", request.url), { headers: request.headers }));
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, s-maxage=1, stale-while-revalidate=2");
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      return response;
     }
 
     if (url.pathname === "/api/latency") {
+      const cacheKey = new Request(request.url, { method: "GET" });
+      let cached = await cache.match(cacheKey);
+      if (cached) return addSecurityHeaders(cached);
+
       const stub = env.PRICE_AGGREGATOR.get(id);
-      return addSecurityHeaders(await stub.fetch(new Request(new URL("/latency", request.url), { headers: request.headers })));
+      const res = await stub.fetch(new Request(new URL("/latency", request.url), { headers: request.headers }));
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, s-maxage=2, stale-while-revalidate=5");
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      return response;
     }
 
     if (url.pathname === "/api/hip3") {
+      const cacheKey = new Request(request.url, { method: "GET" });
+      let cached = await cache.match(cacheKey);
+      if (cached) return addSecurityHeaders(cached);
+
       const stub = env.PRICE_AGGREGATOR.get(id);
-      return addSecurityHeaders(await stub.fetch(new Request(new URL("/hip3", request.url), { headers: request.headers })));
+      const res = await stub.fetch(new Request(new URL("/hip3", request.url), { headers: request.headers }));
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, s-maxage=5, stale-while-revalidate=10");
+      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      return response;
     }
 
     // ─── Agent SDK routing (Chat DO) ───
