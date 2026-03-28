@@ -238,32 +238,89 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       socket.onmessage = (event) => {
         if (event.data === "pong") return;
 
-        // When tab is hidden, only update data (for latency tracking)
-        // but skip tick accumulation to save memory
-        try {
-          const newData = JSON.parse(event.data) as DashboardData;
-          const lat = newData.serverTs
-            ? Date.now() - newData.serverTs
-            : Date.now() - (newData.timestamp || Date.now());
+        // Capture receive time BEFORE parsing for accurate network RTT
+        const receivedAt = Date.now();
 
-          if (tabVisible) {
-            const ticks = appendTicks(
-              get().rawTicks,
-              newData.assets,
-              newData.timestamp,
-            );
-            set({
-              data: newData,
-              latencyMs: Math.max(0, lat),
-              rawTicks: ticks,
-              tickVersion: get().tickVersion + 1,
+        try {
+          const msg = JSON.parse(event.data);
+
+          // Detect format: full snapshot has "assets", delta has "a"
+          if (msg.assets) {
+            // ── Full snapshot (initial connect or "refresh" response) ──
+            const fullData = msg as DashboardData;
+            const lat = receivedAt - (fullData.serverTs ?? fullData.timestamp ?? receivedAt);
+
+            if (tabVisible) {
+              const ticks = appendTicks(get().rawTicks, fullData.assets, fullData.timestamp);
+              set({
+                data: fullData,
+                latencyMs: Math.max(0, lat),
+                rawTicks: ticks,
+                tickVersion: get().tickVersion + 1,
+              });
+            } else {
+              set({ data: fullData, latencyMs: Math.max(0, lat) });
+            }
+          } else if (msg.a) {
+            // ── Compact delta (ongoing 60fps updates) ──
+            // Format: {a:[{s:"BTC",p:67000,c:12,m:67010,...}], t:ms, st:ms}
+            const lat = receivedAt - (msg.st ?? msg.t ?? receivedAt);
+            const prev = get().data;
+            if (!prev) return; // Need full snapshot first
+
+            // Merge delta into existing assets
+            const updatedAssets = prev.assets.map((asset) => {
+              const d = msg.a.find((u: any) => u.s === asset.symbol);
+              if (!d) return asset;
+              return {
+                symbol: asset.symbol,
+                pythPrice: d.p ?? asset.pythPrice,
+                pythConfidence: d.c ?? asset.pythConfidence,
+                pythExpo: d.e ?? asset.pythExpo,
+                markPrice: d.m ?? asset.markPrice,
+                oracleDiscrepancy: d.d ?? asset.oracleDiscrepancy,
+                change24h: d.ch ?? asset.change24h,
+                fundingRate: d.f ?? asset.fundingRate,
+                openInterest: d.oi ?? asset.openInterest,
+                volume24h: d.v ?? asset.volume24h,
+                publishTime: d.pt ?? asset.publishTime,
+                bestBidPrice: d.bb ?? asset.bestBidPrice,
+                bestAskPrice: d.ba ?? asset.bestAskPrice,
+                publisherCount: d.pc ?? asset.publisherCount,
+              };
             });
-          } else {
-            // Hidden tab: update prices only, skip ticks (saves memory + CPU)
-            set({
-              data: newData,
-              latencyMs: Math.max(0, lat),
-            });
+
+            // Recompute aggregates
+            let totalVolume = 0, totalOI = 0, fundingSum = 0, discrepancies = 0;
+            for (const a of updatedAssets) {
+              totalVolume += a.volume24h;
+              totalOI += a.openInterest;
+              fundingSum += a.fundingRate;
+              if (a.oracleDiscrepancy > 0.5) discrepancies++;
+            }
+
+            const newData: DashboardData = {
+              assets: updatedAssets,
+              totalVolume24h: totalVolume,
+              totalOpenInterest: totalOI,
+              avgFundingRate: updatedAssets.length > 0 ? fundingSum / updatedAssets.length : 0,
+              discrepancyCount: discrepancies,
+              timestamp: msg.t,
+              serverTs: msg.st,
+              sources: msg.src ?? prev.sources, // Merge sources from delta when present
+            };
+
+            if (tabVisible) {
+              const ticks = appendTicks(get().rawTicks, updatedAssets, msg.t);
+              set({
+                data: newData,
+                latencyMs: Math.max(0, lat),
+                rawTicks: ticks,
+                tickVersion: get().tickVersion + 1,
+              });
+            } else {
+              set({ data: newData, latencyMs: Math.max(0, lat) });
+            }
           }
         } catch {
           // Ignore malformed messages

@@ -236,8 +236,11 @@ export class PriceAggregator extends DurableObject<Env> {
     }
 
     if (url.pathname === "/prices") {
-      if (!this.cachedJson) await this.fetchInitialData();
-      return new Response(this.cachedJson || this.buildSnapshot(), {
+      if (!this.cachedJson) {
+        await this.fetchInitialData();
+        this.cachedJson = this.buildSnapshot();
+      }
+      return new Response(this.cachedJson, {
         headers: {
           "Content-Type": "application/json",
           "Cache-Control": "public, max-age=0, stale-while-revalidate=2",
@@ -1002,12 +1005,74 @@ export class PriceAggregator extends DurableObject<Env> {
     }
   }
 
+  private broadcastCount = 0;
+
   private broadcast() {
-    const json = this.buildSnapshot();
-    this.cachedJson = json;
+    const delta = this.buildDelta();
+    this.cachedJson = null; // Invalidate — rebuilt lazily on next REST request
     for (const ws of this.ctx.getWebSockets()) {
-      try { ws.send(json); } catch {}
+      try { ws.send(delta); } catch {}
     }
+    this.broadcastCount++;
+  }
+
+  // ─── Compact delta payload for WS (short keys, dirty assets only) ─
+  // Format: {"a":[{"s":"BTC","p":67000,"c":12,"m":67010,...}],"t":1234,"st":1234}
+  // ~200-400 bytes vs ~3400 bytes for full snapshot = 85% smaller
+
+  private buildDelta(): string {
+    const dirty = this.dirtyAssets;
+    const now = Date.now();
+    const deltaAssets: any[] = [];
+
+    for (const symbol of dirty) {
+      const st = this.state.get(symbol);
+      if (!st || (st.pythPrice === 0 && st.markPrice === 0)) continue;
+
+      const markPrice = st.markPrice || st.pythPrice;
+      deltaAssets.push({
+        s: symbol,
+        p: st.pythPrice,
+        c: st.pythConfidence,
+        e: st.pythExpo,
+        m: markPrice,
+        d: markPrice > 0 ? Math.abs((st.pythPrice - markPrice) / markPrice) * 100 : 0,
+        ch: st.prevDayPx > 0 ? ((markPrice - st.prevDayPx) / st.prevDayPx) * 100 : 0,
+        f: st.fundingRate,
+        oi: st.openInterest * markPrice,
+        v: st.volume24h,
+        pt: st.pythPublishTime,
+        bb: st.bestBidPrice,
+        ba: st.bestAskPrice,
+        pc: st.publisherCount,
+      });
+    }
+
+    dirty.clear();
+
+    const payload: any = {
+      a: deltaAssets,
+      t: now,
+      st: now,
+    };
+
+    // Include sources every ~5s so client stays informed
+    if (this.broadcastCount % 300 === 0) {
+      const pythProUp = this.pythProConnected.some(Boolean);
+      payload.src = {
+        pythPro: this.usingPythPro && pythProUp,
+        pythHermes: this.pythHermesConnected,
+        pythHermesBeta: this.pythHermesBetaConnected,
+        hlWs: this.hlConnected,
+        mode: this.usingPythPro ? "pro" : "hermes",
+        pythProLatencyMs: this.usingPythPro ? this.pythProLatencyMs : null,
+        hlRestLatencyMs: this.hlRestLatencyMs || null,
+        hlWsIntervalMs: this.hlWsIntervalMs || null,
+        pythPublishDelayMs: this.pythPublishDelayMs || null,
+      };
+    }
+
+    return JSON.stringify(payload);
   }
 
   // ─── Build JSON snapshot (incremental per-asset caching) ─
