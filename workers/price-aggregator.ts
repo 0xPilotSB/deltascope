@@ -487,6 +487,8 @@ export class PriceAggregator extends DurableObject<Env> {
         ids: Object.values(PYTH_HERMES_IDS),
         verbose: false,
         binary: false,
+        allow_unordered: true,    // Skip ordering overhead — we dedup by publishTime
+        parsed: true,             // Pre-parsed JSON, skip base64 decoding
       }));
 
       ws.addEventListener("message", (event) => {
@@ -561,7 +563,7 @@ export class PriceAggregator extends DurableObject<Env> {
         if (updated) this.scheduleBroadcast();
       }
     } catch {}
-    this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 2000);
+    this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 1000);
   }
 
   private handleHermesMessage(raw: string | ArrayBuffer) {
@@ -839,7 +841,7 @@ export class PriceAggregator extends DurableObject<Env> {
         }
       }
     } catch (e) { console.error("Meta poll error:", e); }
-    this.metaPollTimer = setTimeout(() => this.pollMeta(), 5000);
+    this.metaPollTimer = setTimeout(() => this.pollMeta(), 3000);
   }
 
   // ─── Initial REST bootstrap ─────────────────────────────

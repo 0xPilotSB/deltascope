@@ -11,10 +11,11 @@ import type { Route } from "./+types/root";
 import "./app.css";
 
 export const links: Route.LinksFunction = () => [
-  // DNS-prefetch for upstream data sources — saves 100-300ms on first request
-  { rel: "dns-prefetch", href: "https://hermes.pyth.network" },
-  { rel: "dns-prefetch", href: "https://hermes-beta.pyth.network" },
-  { rel: "dns-prefetch", href: "https://api.hyperliquid.xyz" },
+  // Preconnect to upstream data sources — saves 100-300ms on first WS/REST call
+  // (preconnect = DNS + TCP + TLS; stronger than dns-prefetch)
+  { rel: "preconnect", href: "https://hermes.pyth.network" },
+  { rel: "preconnect", href: "https://hermes-beta.pyth.network" },
+  { rel: "preconnect", href: "https://api.hyperliquid.xyz" },
   {
     rel: "icon",
     type: "image/svg+xml",

@@ -1,6 +1,5 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@fontsource-variable/figtree";
 @import "@fontsource-variable/space-grotesk";
 
 @custom-variant dark (&:is(.dark *));
@@ -144,7 +143,7 @@
 }
 
 @theme inline {
-    --font-sans: 'Figtree Variable', sans-serif;
+    --font-sans: 'Space Grotesk Variable', sans-serif;
     --font-display: 'Space Grotesk Variable', sans-serif;
     --color-background: var(--background);
     --color-foreground: var(--foreground);
