@@ -981,15 +981,15 @@ export class PriceAggregator extends DurableObject<Env> {
     }
   }
 
-  // ─── Broadcast throttle (16ms — direct call when elapsed, setTimeout otherwise) ─
+  // ─── Broadcast throttle (100ms = 10fps — matches client display rate) ─
+  private static readonly BROADCAST_INTERVAL = 100;
 
   private scheduleBroadcast() {
     if (this.broadcastPending) return;
     this.broadcastPending = true;
 
     const elapsed = performance.now() - this.lastBroadcastTime;
-    if (elapsed >= 16) {
-      // Execute synchronously — no microtask queue overhead
+    if (elapsed >= PriceAggregator.BROADCAST_INTERVAL) {
       this.broadcastPending = false;
       this.lastBroadcastTime = performance.now();
       this.broadcast();
@@ -998,7 +998,7 @@ export class PriceAggregator extends DurableObject<Env> {
         this.broadcastPending = false;
         this.lastBroadcastTime = performance.now();
         this.broadcast();
-      }, 16 - elapsed);
+      }, PriceAggregator.BROADCAST_INTERVAL - elapsed);
     }
   }
 

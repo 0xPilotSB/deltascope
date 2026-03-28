@@ -294,7 +294,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   // Throttle chart updates to ~2fps (every 30 ticks) to avoid
   // creating shallow copies 60 times/sec while still reacting to
   // in-place-mutated rawTicks arrays.
-  const chartTickEpoch = useMemo(() => Math.floor(tickVersion / 30), [tickVersion]);
+  const chartTickEpoch = useMemo(() => Math.floor(tickVersion / 5), [tickVersion]);
   const chartTicks = useMemo(() => {
     const arr = rawTicks.get(chartAsset);
     return arr ? arr.slice() : [];

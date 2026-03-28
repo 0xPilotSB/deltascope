@@ -159,10 +159,10 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
           setLatencyData(data as LatencyData);
         }
       } catch {}
-      if (active) setTimeout(poll, 15000);
+      if (active) setTimeout(poll, 30000);
     };
     // Start polling after initial data
-    const timer = setTimeout(poll, 15000);
+    const timer = setTimeout(poll, 30000);
     return () => { active = false; clearTimeout(timer); };
   }, []);
 
@@ -276,7 +276,7 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
     };
 
     runProbes();
-    const interval = setInterval(runProbes, 10000);
+    const interval = setInterval(runProbes, 30000);
     return () => { active = false; clearInterval(interval); };
   }, []);
 

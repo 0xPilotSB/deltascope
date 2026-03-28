@@ -73,7 +73,8 @@ interface PriceStore {
 
 // ─── Constants ─────────────────────────────────────────────
 
-const MAX_TICKS = 36000; // ~10 min at ~60 ticks/s
+// Server sends at 10fps now, 10 * 60 * 15 = 9000 ticks per asset for 15 min
+const MAX_TICKS = 9000;
 
 // ─── Internal refs (module-scoped, SSR-safe) ───────────────
 
@@ -82,6 +83,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let alive = false;
 let reconnectAttempt = 0;
+let tabVisible = true;
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -90,10 +92,6 @@ function appendTicks(
   assets: AssetData[],
   timestamp: number,
 ): Map<string, TickData[]> {
-  // Mutate in place to avoid creating a new Map + 8 new arrays every
-  // WebSocket message (~60/sec). The old immutable copy caused hundreds of
-  // thousands of allocations over 10-20 min, leading to GC pressure and
-  // browser tab crashes / auto-reloads.
   for (const asset of assets) {
     const price = asset.pythPrice;
     if (!price || price <= 0) continue;
@@ -106,8 +104,6 @@ function appendTicks(
 
     arr.push({ time: timestamp, price });
 
-    // Trim oldest ticks — drop first 10% when over limit to avoid
-    // frequent small splices
     if (arr.length > MAX_TICKS) {
       const drop = Math.floor(MAX_TICKS * 0.1);
       arr.splice(0, drop);
@@ -148,7 +144,6 @@ export function aggregateCandles(
     }
   }
 
-  // Push final candle
   if (currentStart >= 0) {
     candles.push({ time: currentStart, open: o, high: h, low: l, close: c });
   }
@@ -180,7 +175,6 @@ export function aggregateLine(
     lastPrice = tick.price;
   }
 
-  // Push final point
   if (currentStart >= 0) {
     points.push({ time: currentStart, value: lastPrice });
   }
@@ -206,13 +200,20 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
   },
 
   connect: () => {
-    // Guard: only run client-side
     if (typeof window === "undefined") return;
-
-    // Prevent duplicate connections
     if (ws) return;
 
     alive = true;
+
+    // ── Visibility API: pause/resume WS when tab hidden/visible ──
+    const handleVisibility = () => {
+      tabVisible = !document.hidden;
+      // When tab becomes visible again, request fresh data
+      if (tabVisible && ws?.readyState === WebSocket.OPEN) {
+        ws.send("refresh");
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
 
     function doConnect() {
       if (!alive) return;
@@ -226,7 +227,6 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       socket.onopen = () => {
         reconnectAttempt = 0;
         set({ isConnected: true });
-        // Keepalive ping every 30s to prevent browser/proxy idle timeout
         if (pingTimer) clearInterval(pingTimer);
         pingTimer = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
@@ -236,26 +236,35 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       };
 
       socket.onmessage = (event) => {
-        if (event.data === "pong") return; // keepalive response
+        if (event.data === "pong") return;
+
+        // When tab is hidden, only update data (for latency tracking)
+        // but skip tick accumulation to save memory
         try {
           const newData = JSON.parse(event.data) as DashboardData;
-          // Use serverTs for accurate edge→browser delivery latency
           const lat = newData.serverTs
             ? Date.now() - newData.serverTs
             : Date.now() - (newData.timestamp || Date.now());
 
-          const ticks = appendTicks(
-            get().rawTicks,
-            newData.assets,
-            newData.timestamp,
-          );
-
-          set({
-            data: newData,
-            latencyMs: Math.max(0, lat),
-            rawTicks: ticks,
-            tickVersion: get().tickVersion + 1,
-          });
+          if (tabVisible) {
+            const ticks = appendTicks(
+              get().rawTicks,
+              newData.assets,
+              newData.timestamp,
+            );
+            set({
+              data: newData,
+              latencyMs: Math.max(0, lat),
+              rawTicks: ticks,
+              tickVersion: get().tickVersion + 1,
+            });
+          } else {
+            // Hidden tab: update prices only, skip ticks (saves memory + CPU)
+            set({
+              data: newData,
+              latencyMs: Math.max(0, lat),
+            });
+          }
         } catch {
           // Ignore malformed messages
         }
@@ -266,7 +275,6 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
         set({ isConnected: false });
         ws = null;
         if (alive) {
-          // Exponential backoff: 500ms, 1s, 2s, 4s, max 10s + jitter
           const baseDelay = Math.min(500 * Math.pow(2, reconnectAttempt), 10000);
           const jitter = Math.random() * 500;
           reconnectAttempt++;
@@ -280,10 +288,20 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
     }
 
     doConnect();
+
+    // Store cleanup ref for disconnect
+    (usePriceStore as any).__visibilityHandler = handleVisibility;
   },
 
   disconnect: () => {
     alive = false;
+
+    // Remove visibility listener
+    const handler = (usePriceStore as any).__visibilityHandler;
+    if (handler) {
+      document.removeEventListener("visibilitychange", handler);
+      (usePriceStore as any).__visibilityHandler = null;
+    }
 
     if (pingTimer) {
       clearInterval(pingTimer);

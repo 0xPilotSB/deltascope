@@ -220,11 +220,12 @@ export default function PredictPage({ loaderData }: Route.ComponentProps) {
     return () => disconnect();
   }, [connect, disconnect]);
 
-  // Auto-revalidate every 5s to pick up settled predictions
+  // Auto-revalidate every 15s to pick up settled predictions
+  // (settlement happens via DO alarm, no need for aggressive polling)
   useEffect(() => {
     const timer = setInterval(() => {
       if (revalidator.state === "idle") revalidator.revalidate();
-    }, 5000);
+    }, 15000);
     return () => clearInterval(timer);
   }, [revalidator]);
 
