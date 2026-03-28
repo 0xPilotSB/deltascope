@@ -56,9 +56,7 @@ const ASSET_COLORS: Record<string, string> = {
 const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
   { label: "Latency Monitor", href: "/latency" },
-  { label: "Price Feeds", href: "https://www.pyth.network/price-feeds" },
   { label: "Developers", href: "/developers" },
-  { label: "Ecosystem", href: "https://www.pyth.network/ecosystem" },
   { label: "Community", href: "https://discord.gg/pyth", external: true },
 ];
 
@@ -692,7 +690,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                     <SelectTrigger className="w-[100px] bg-white/5 border-white/10 h-8 text-sm">
                       <SelectValue />
                     </SelectTrigger>
-                    <SelectContent>
+                    <SelectContent position="popper" sideOffset={4}>
                       {(data?.assets ?? []).map((a) => (
                         <SelectItem key={a.symbol} value={a.symbol}>
                           {a.symbol}
@@ -852,7 +850,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                       <SelectTrigger className="bg-white/5 border-white/10 h-9 text-sm">
                         <SelectValue />
                       </SelectTrigger>
-                      <SelectContent>
+                      <SelectContent position="popper" sideOffset={4}>
                         {(data?.assets ?? []).map((a) => (
                           <SelectItem key={a.symbol} value={a.symbol}>
                             {a.symbol}/USD
