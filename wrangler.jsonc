@@ -27,12 +27,14 @@
 		"bindings": [
 			{ "name": "PRICE_AGGREGATOR", "class_name": "PriceAggregator" },
 			{ "name": "Chat", "class_name": "Chat" },
-			{ "name": "CHAT_SESSIONS", "class_name": "ChatSessionsDO" }
+			{ "name": "CHAT_SESSIONS", "class_name": "ChatSessionsDO" },
+			{ "name": "PREDICTION_GAME", "class_name": "PredictionGame" }
 		]
 	},
 	"migrations": [
 		{ "tag": "v1", "new_sqlite_classes": ["PriceAggregator"] },
-		{ "tag": "v2", "new_sqlite_classes": ["Chat", "ChatSessionsDO"] }
+		{ "tag": "v2", "new_sqlite_classes": ["Chat", "ChatSessionsDO"] },
+		{ "tag": "v3", "new_sqlite_classes": ["PredictionGame"] }
 	],
 
 	/**

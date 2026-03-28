@@ -7,6 +7,7 @@ export { ExampleDO } from "./example-do";
 export { LocalDataProxyService } from "./data-proxy";
 export { ChatSessionsDO } from "./chat-sessions";
 export { Chat } from "./chat";
+export { PredictionGame } from "./prediction-game";
 
 /**
  * Augment AppLoadContext to include Cloudflare bindings.
