@@ -199,19 +199,44 @@ Pyth provides a `confidence` value with every price update — a measure of publ
 
 ---
 
-## Tech Stack
+## Tech Stack — Full-Stack Application
 
-| Layer | Technology |
-|-------|-----------|
-| **Runtime** | Cloudflare Workers + Durable Objects |
-| **Framework** | React Router 7 (SSR) |
-| **Oracle Data** | Pyth Network (Hermes WS + REST, Lazer-ready) |
-| **DEX Data** | Hyperliquid (WebSocket + REST API) |
-| **State Management** | Zustand |
-| **Charts** | TradingView Lightweight Charts |
-| **AI** | Vercel AI SDK + Workers AI |
-| **Styling** | Tailwind CSS 4 + shadcn/ui |
-| **Font** | Space Grotesk (self-hosted via @fontsource) |
+DeltaScope is a **full-stack application** with a persistent backend, server-side rendering, and real-time WebSocket infrastructure.
+
+### Backend
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| **Runtime** | Cloudflare Workers | Edge-deployed serverless runtime |
+| **Persistent Backend** | Durable Objects (×3) | `PriceAggregator` — stateful price engine with 4 upstream connections, 24/7 alarm keep-alive; `Chat` — AI agent DO; `ChatSessionsDO` — session index |
+| **Oracle Ingestion** | Pyth Network Hermes | Dual WebSocket (main + beta) + REST polling every 1s — triple-source freshness dedup |
+| **Oracle Ingestion (Pro)** | Pyth Lazer (optional) | 3 redundant WS endpoints, `real_time` channel, sub-50ms updates |
+| **DEX Data** | Hyperliquid API | WebSocket (`allMids` stream) + REST polling every 3s (`metaAndAssetCtxs`) |
+| **AI Engine** | Vercel AI SDK + Workers AI | Streaming LLM with 6 structured tools querying Pyth + Hyperliquid APIs |
+| **API Layer** | REST + WebSocket | `/api/prices`, `/api/latency`, `/api/hip3` (REST); `/ws/prices` (real-time WS fan-out) |
+| **Security** | CSP + CORS + Origin validation | Hardened headers, WebSocket origin checks, HttpOnly cookies |
+
+### Frontend
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| **Framework** | React Router 7 (SSR) | Server-side rendered pages with typed loaders/actions |
+| **State Management** | Zustand | Client-side WebSocket connection + tick aggregation |
+| **Charts** | TradingView Lightweight Charts | Candlestick charts (analysis) + multi-line latency charts |
+| **UI Components** | shadcn/ui + Tailwind CSS 4 | Dark theme, responsive layout, accessible components |
+| **Typography** | Space Grotesk (self-hosted) | Zero external font requests via @fontsource |
+| **AI Chat** | @cloudflare/ai-chat + agents SDK | Lazy-mounted chat popup with retry-aware message fetching |
+
+### Infrastructure & DevOps
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| **Deployment** | Cloudflare Workers (edge) | Global CDN, Smart Placement near Pyth/HL backends |
+| **Package Manager** | Bun | Fast installs, builds, and script execution |
+| **Build** | Vite + React Router | SSR build with Cloudflare plugin |
+| **Type Safety** | TypeScript (strict) | End-to-end types from DO → loader → component |
+| **Testing** | Vitest + Playwright | Unit tests (Workers pool) + E2E scaffolding |
+| **Caching** | Cloudflare Edge | Immutable assets (1yr), HTML (5s + stale-while-revalidate) |
 
 ---
 
