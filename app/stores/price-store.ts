@@ -61,6 +61,9 @@ interface PriceStore {
   latencyMs: number | null;
   // Raw ticks per asset (for aggregation into any timeframe)
   rawTicks: Map<string, TickData[]>;
+  // Monotonic counter — bumped on every tick append so subscribers
+  // know the Map contents changed (since we mutate in place).
+  tickVersion: number;
 
   // ── Actions ──
   connect: () => void;
@@ -86,26 +89,31 @@ function appendTicks(
   assets: AssetData[],
   timestamp: number,
 ): Map<string, TickData[]> {
-  const next = new Map(ticks);
-
+  // Mutate in place to avoid creating a new Map + 8 new arrays every
+  // WebSocket message (~60/sec). The old immutable copy caused hundreds of
+  // thousands of allocations over 10-20 min, leading to GC pressure and
+  // browser tab crashes / auto-reloads.
   for (const asset of assets) {
     const price = asset.pythPrice;
     if (!price || price <= 0) continue;
 
-    const existing = next.get(asset.symbol);
-    const arr = existing ? [...existing] : [];
+    let arr = ticks.get(asset.symbol);
+    if (!arr) {
+      arr = [];
+      ticks.set(asset.symbol, arr);
+    }
 
     arr.push({ time: timestamp, price });
 
-    // Trim oldest ticks
+    // Trim oldest ticks — drop first 10% when over limit to avoid
+    // frequent small splices
     if (arr.length > MAX_TICKS) {
-      arr.splice(0, arr.length - MAX_TICKS);
+      const drop = Math.floor(MAX_TICKS * 0.1);
+      arr.splice(0, drop);
     }
-
-    next.set(asset.symbol, arr);
   }
 
-  return next;
+  return ticks;
 }
 
 /** Aggregate raw ticks into OHLC candles for a given interval */
@@ -187,12 +195,13 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
   isConnected: false,
   latencyMs: null,
   rawTicks: new Map(),
+  tickVersion: 0,
 
   // ── Actions ──
 
   setInitialData: (data: DashboardData) => {
     const ticks = appendTicks(get().rawTicks, data.assets, data.timestamp);
-    set({ data, rawTicks: ticks });
+    set({ data, rawTicks: ticks, tickVersion: get().tickVersion + 1 });
   },
 
   connect: () => {
@@ -236,6 +245,7 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             data: newData,
             latencyMs: Math.max(0, lat),
             rawTicks: ticks,
+            tickVersion: get().tickVersion + 1,
           });
         } catch {
           // Ignore malformed messages

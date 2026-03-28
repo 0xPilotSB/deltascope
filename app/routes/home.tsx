@@ -248,7 +248,7 @@ function DashboardLoader({ dataPromise }: { dataPromise: Promise<DashboardData |
 
 function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   // ── Zustand store ──
-  const { data, isConnected, latencyMs, rawTicks, connect, disconnect, setInitialData } = usePriceStore();
+  const { data, isConnected, latencyMs, rawTicks, tickVersion, connect, disconnect, setInitialData } = usePriceStore();
 
   // Hydrate store with SSR data and connect WebSocket
   useEffect(() => {
@@ -281,7 +281,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   // Raw ticks for selected chart asset
   const chartTicks = useMemo(() => {
     return rawTicks.get(chartAsset) ?? [];
-  }, [rawTicks, chartAsset]);
+  }, [rawTicks, chartAsset, tickVersion]);
 
   const chartCurrentPrice = useMemo(() => {
     const asset = data?.assets.find((a) => a.symbol === chartAsset);

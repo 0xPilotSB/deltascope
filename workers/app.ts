@@ -155,9 +155,11 @@ export default {
     const ct = secured.headers.get("Content-Type");
     if (ct?.includes("text/html")) {
       secured.headers.set("Link", `<wss://${url.hostname}/ws/prices>; rel=preconnect`);
-      // Edge-cache HTML: short TTL, serve stale while revalidating
+      // No edge-caching on HTML — SSR pages are dynamic with WebSocket state.
+      // stale-while-revalidate was causing background revalidation that
+      // triggered full page reloads after 10-20 minutes.
       if (!secured.headers.has("Cache-Control")) {
-        secured.headers.set("Cache-Control", "public, max-age=5, stale-while-revalidate=30");
+        secured.headers.set("Cache-Control", "no-cache");
       }
     }
 
