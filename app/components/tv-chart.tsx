@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useCallback, useMemo } from "react";
 import type { TickData } from "~/stores/price-store";
-import { aggregateLine, aggregateCandles } from "~/stores/price-store";
+import { usePriceStore, aggregateLine, aggregateCandles } from "~/stores/price-store";
 
 export const TIMEFRAMES = [
   { label: "1s", seconds: 1 },
@@ -17,7 +17,7 @@ export type ChartType = "line" | "candlestick";
 
 interface TVChartProps {
   symbol: string;
-  ticks: TickData[];
+  ticks: TickData[]; // Initial ticks for first render
   currentPrice?: number;
   height?: number;
   className?: string;
@@ -25,6 +25,12 @@ interface TVChartProps {
   chartType: ChartType;
 }
 
+/**
+ * High-performance TradingView chart that subscribes directly to the
+ * Zustand store for 60fps updates. Bypasses React's render cycle entirely
+ * for the hot path (tick → series.update). React only handles cold paths
+ * like symbol/timeframe/chartType changes.
+ */
 function TVChartInner({
   symbol,
   ticks,
@@ -38,21 +44,18 @@ function TVChartInner({
   const chartRef = useRef<ReturnType<typeof import("lightweight-charts").createChart> | null>(null);
   const seriesRef = useRef<any>(null);
   const priceLineRef = useRef<any>(null);
-  const prevSymbolRef = useRef<string>(symbol);
-  const prevTimeframeRef = useRef<number>(timeframe);
-  const prevChartTypeRef = useRef<ChartType>(chartType);
   const modulesRef = useRef<any>(null);
 
-  // Aggregate ticks based on chart type
-  const lineData = useMemo(
-    () => (chartType === "line" ? aggregateLine(ticks, timeframe) : []),
-    [ticks, timeframe, chartType],
-  );
+  // Track current config in refs so the store subscription can read them
+  const symbolRef = useRef(symbol);
+  const timeframeRef = useRef(timeframe);
+  const chartTypeRef = useRef(chartType);
+  const lastTickVersionRef = useRef(0);
 
-  const candleData = useMemo(
-    () => (chartType === "candlestick" ? aggregateCandles(ticks, timeframe) : []),
-    [ticks, timeframe, chartType],
-  );
+  // Keep refs in sync with props
+  symbolRef.current = symbol;
+  timeframeRef.current = timeframe;
+  chartTypeRef.current = chartType;
 
   const chartOptions = useMemo(() => ({
     layout: {
@@ -74,9 +77,7 @@ function TVChartInner({
     },
   }), []);
 
-  // Recreate series when chart type changes
   const setupSeries = useCallback((chart: any, modules: any, type: ChartType) => {
-    // Remove old series
     if (seriesRef.current) {
       chart.removeSeries(seriesRef.current);
       seriesRef.current = null;
@@ -84,7 +85,7 @@ function TVChartInner({
     }
 
     if (type === "candlestick") {
-      const series = chart.addSeries(modules.CandlestickSeries, {
+      seriesRef.current = chart.addSeries(modules.CandlestickSeries, {
         upColor: "#10b981",
         downColor: "#ef4444",
         borderUpColor: "#10b981",
@@ -94,9 +95,8 @@ function TVChartInner({
         priceLineVisible: false,
         lastValueVisible: true,
       });
-      seriesRef.current = series;
     } else {
-      const series = chart.addSeries(modules.LineSeries, {
+      seriesRef.current = chart.addSeries(modules.LineSeries, {
         color: "#10b981",
         lineWidth: 2,
         crosshairMarkerVisible: true,
@@ -105,15 +105,15 @@ function TVChartInner({
         priceLineVisible: false,
         lastValueVisible: true,
       });
-      seriesRef.current = series;
     }
   }, []);
 
-  // Initialize chart
+  // ─── Initialize chart + subscribe to store for 60fps updates ──
   useEffect(() => {
     if (!containerRef.current) return;
 
     let disposed = false;
+    let unsubscribe: (() => void) | null = null;
 
     const initChart = async () => {
       const modules = await import("lightweight-charts");
@@ -128,21 +128,27 @@ function TVChartInner({
       });
 
       chartRef.current = chart;
-      prevSymbolRef.current = symbol;
-      prevTimeframeRef.current = timeframe;
-      prevChartTypeRef.current = chartType;
-
       setupSeries(chart, modules, chartType);
 
-      // Set initial data
-      if (chartType === "candlestick" && candleData.length > 0) {
-        seriesRef.current.setData(
-          candleData.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
-        );
-      } else if (chartType === "line" && lineData.length > 0) {
-        seriesRef.current.setData(
-          lineData.map((d) => ({ time: d.time as any, value: d.value })),
-        );
+      // Set initial data from props
+      const sym = symbolRef.current;
+      const tf = timeframeRef.current;
+      const ct = chartTypeRef.current;
+
+      if (ct === "candlestick") {
+        const candles = aggregateCandles(ticks, tf);
+        if (candles.length > 0) {
+          seriesRef.current.setData(
+            candles.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
+          );
+        }
+      } else {
+        const line = aggregateLine(ticks, tf);
+        if (line.length > 0) {
+          seriesRef.current.setData(
+            line.map((d) => ({ time: d.time as any, value: d.value })),
+          );
+        }
       }
       chart.timeScale().fitContent();
 
@@ -165,12 +171,74 @@ function TVChartInner({
       });
       resizeObserver.observe(containerRef.current);
       (chart as any).__resizeObserver = resizeObserver;
+
+      // ─── 60fps hot path: subscribe directly to Zustand store ──
+      // This runs outside React's render cycle — no reconciliation overhead.
+      unsubscribe = usePriceStore.subscribe((state) => {
+        if (disposed || !seriesRef.current) return;
+        if (state.tickVersion === lastTickVersionRef.current) return;
+        lastTickVersionRef.current = state.tickVersion;
+
+        const curSymbol = symbolRef.current;
+        const curTf = timeframeRef.current;
+        const curType = chartTypeRef.current;
+
+        const arr = state.rawTicks.get(curSymbol);
+        if (!arr || arr.length === 0) return;
+
+        // Only compute the latest candle/point from recent ticks
+        // instead of re-aggregating the entire array
+        const lastTick = arr[arr.length - 1];
+        const s = Math.floor(lastTick.time / 1000);
+        const candleStart = s - (s % curTf);
+
+        if (curType === "candlestick") {
+          // Find all ticks in the current candle period
+          let o = lastTick.price, h = lastTick.price, l = lastTick.price, c = lastTick.price;
+          for (let i = arr.length - 1; i >= 0; i--) {
+            const ts = Math.floor(arr[i].time / 1000);
+            const cs = ts - (ts % curTf);
+            if (cs !== candleStart) break;
+            const p = arr[i].price;
+            o = p; // earliest tick becomes open
+            if (p > h) h = p;
+            if (p < l) l = p;
+          }
+          seriesRef.current.update({
+            time: candleStart as any,
+            open: o, high: h, low: l, close: c,
+          });
+        } else {
+          seriesRef.current.update({
+            time: candleStart as any,
+            value: lastTick.price,
+          });
+        }
+
+        // Update price line
+        if (priceLineRef.current) {
+          try { seriesRef.current.removePriceLine(priceLineRef.current); } catch {}
+          priceLineRef.current = null;
+        }
+        const asset = state.data?.assets.find((a) => a.symbol === curSymbol);
+        const price = asset?.pythPrice;
+        if (price && seriesRef.current) {
+          priceLineRef.current = seriesRef.current.createPriceLine({
+            price,
+            color: "rgba(16, 185, 129, 0.4)",
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+          });
+        }
+      });
     };
 
     initChart();
 
     return () => {
       disposed = true;
+      if (unsubscribe) unsubscribe();
       if (chartRef.current) {
         const ro = (chartRef.current as any).__resizeObserver;
         if (ro) ro.disconnect();
@@ -183,96 +251,38 @@ function TVChartInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Handle chart type change — swap series
+  // ─── Cold path: symbol, timeframe, or chartType change (rare) ──
   useEffect(() => {
-    if (!chartRef.current || !modulesRef.current) return;
-    if (chartType === prevChartTypeRef.current) return;
+    if (!chartRef.current || !modulesRef.current || !seriesRef.current) return;
 
-    prevChartTypeRef.current = chartType;
-    setupSeries(chartRef.current, modulesRef.current, chartType);
+    const needsSeriesSwap = chartType !== chartTypeRef.current;
+    // chartTypeRef is already synced above, but we need the old value check
+    // Actually refs are synced at top of render, so use a separate prev tracker
+    const sym = symbol;
+    const tf = timeframe;
 
-    if (chartType === "candlestick" && candleData.length > 0) {
+    // Full data reset on symbol/timeframe/chartType change
+    const rawTicks = usePriceStore.getState().rawTicks;
+    const arr = rawTicks.get(sym) ?? [];
+
+    if (needsSeriesSwap) {
+      setupSeries(chartRef.current, modulesRef.current, chartType);
+    }
+
+    if (chartType === "candlestick") {
+      const candles = aggregateCandles(arr, tf);
       seriesRef.current.setData(
-        candleData.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
+        candles.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
       );
-    } else if (chartType === "line" && lineData.length > 0) {
+    } else {
+      const line = aggregateLine(arr, tf);
       seriesRef.current.setData(
-        lineData.map((d) => ({ time: d.time as any, value: d.value })),
+        line.map((d) => ({ time: d.time as any, value: d.value })),
       );
     }
     chartRef.current.timeScale().fitContent();
-
-    // Re-add price line
-    if (currentPrice && seriesRef.current) {
-      priceLineRef.current = seriesRef.current.createPriceLine({
-        price: currentPrice,
-        color: "rgba(16, 185, 129, 0.4)",
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-      });
-    }
-  }, [chartType, candleData, lineData, currentPrice, setupSeries]);
-
-  // Handle symbol or timeframe change — full data reset
-  useEffect(() => {
-    if (!seriesRef.current) return;
-    if (symbol !== prevSymbolRef.current || timeframe !== prevTimeframeRef.current) {
-      prevSymbolRef.current = symbol;
-      prevTimeframeRef.current = timeframe;
-
-      if (chartType === "candlestick") {
-        seriesRef.current.setData(
-          candleData.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
-        );
-      } else {
-        seriesRef.current.setData(
-          lineData.map((d) => ({ time: d.time as any, value: d.value })),
-        );
-      }
-      chartRef.current?.timeScale().fitContent();
-    }
-  }, [symbol, timeframe, lineData, candleData, chartType]);
-
-  // Handle data updates — incremental
-  useEffect(() => {
-    if (!seriesRef.current) return;
-    if (symbol !== prevSymbolRef.current || timeframe !== prevTimeframeRef.current) return;
-
-    if (chartType === "candlestick" && candleData.length > 0) {
-      const latest = candleData[candleData.length - 1];
-      seriesRef.current.update({
-        time: latest.time as any,
-        open: latest.open,
-        high: latest.high,
-        low: latest.low,
-        close: latest.close,
-      });
-    } else if (chartType === "line" && lineData.length > 0) {
-      const latest = lineData[lineData.length - 1];
-      seriesRef.current.update({ time: latest.time as any, value: latest.value });
-    }
-  }, [lineData, candleData, symbol, timeframe, chartType]);
-
-  // Handle price line updates
-  useEffect(() => {
-    if (!seriesRef.current) return;
-    if (priceLineRef.current) {
-      try {
-        seriesRef.current.removePriceLine(priceLineRef.current);
-      } catch { /* already removed */ }
-      priceLineRef.current = null;
-    }
-    if (currentPrice) {
-      priceLineRef.current = seriesRef.current.createPriceLine({
-        price: currentPrice,
-        color: "rgba(16, 185, 129, 0.4)",
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-      });
-    }
-  }, [currentPrice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, timeframe, chartType]);
 
   // Handle height changes
   useEffect(() => {

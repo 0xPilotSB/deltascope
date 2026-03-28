@@ -981,8 +981,8 @@ export class PriceAggregator extends DurableObject<Env> {
     }
   }
 
-  // ─── Broadcast throttle (100ms = 10fps — matches client display rate) ─
-  private static readonly BROADCAST_INTERVAL = 100;
+  // ─── Broadcast throttle (16ms = 60fps — full speed to clients) ─
+  private static readonly BROADCAST_INTERVAL = 16;
 
   private scheduleBroadcast() {
     if (this.broadcastPending) return;

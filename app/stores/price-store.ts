@@ -73,8 +73,8 @@ interface PriceStore {
 
 // ─── Constants ─────────────────────────────────────────────
 
-// Server sends at 10fps now, 10 * 60 * 15 = 9000 ticks per asset for 15 min
-const MAX_TICKS = 9000;
+// Server sends at ~60fps, 60 * 60 * 10 = 36000 ticks per asset for 10 min
+const MAX_TICKS = 36000;
 
 // ─── Internal refs (module-scoped, SSR-safe) ───────────────
 
