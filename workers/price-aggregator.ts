@@ -1016,16 +1016,16 @@ export class PriceAggregator extends DurableObject<Env> {
     this.broadcastCount++;
   }
 
-  // ─── Compact delta payload for WS (short keys, dirty assets only) ─
+  // ─── Compact delta payload for WS (short keys, ALL 8 assets every frame) ─
   // Format: {"a":[{"s":"BTC","p":67000,"c":12,"m":67010,...}],"t":1234,"st":1234}
-  // ~200-400 bytes vs ~3400 bytes for full snapshot = 85% smaller
+  // ~700-1200 bytes vs ~3400 bytes for full snapshot = ~65% smaller
+  // Sends all assets every frame — simpler client merge, no stale data risk
 
   private buildDelta(): string {
-    const dirty = this.dirtyAssets;
     const now = Date.now();
     const deltaAssets: any[] = [];
 
-    for (const symbol of dirty) {
+    for (const symbol of SYMBOLS) {
       const st = this.state.get(symbol);
       if (!st || (st.pythPrice === 0 && st.markPrice === 0)) continue;
 
@@ -1048,7 +1048,7 @@ export class PriceAggregator extends DurableObject<Env> {
       });
     }
 
-    dirty.clear();
+    this.dirtyAssets.clear();
 
     const payload: any = {
       a: deltaAssets,
