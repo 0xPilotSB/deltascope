@@ -138,7 +138,11 @@ export class PriceAggregator extends DurableObject<Env> {
   private hip3PollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ─── Perf: exponent cache ──────────────────────────────
-  private expoCache: Map<number, number> = new Map();
+  private expoCache: Map<number, number> = new Map([
+    [-10, 1e-10], [-9, 1e-9], [-8, 1e-8], [-7, 1e-7], [-6, 1e-6],
+    [-5, 1e-5], [-4, 1e-4], [-3, 1e-3], [-2, 1e-2], [-1, 0.1],
+    [0, 1], [1, 10], [2, 100],
+  ]);
 
   // ─── Perf: microtask broadcast with 16ms floor ────────
   private lastBroadcastTime = 0;
@@ -487,6 +491,7 @@ export class PriceAggregator extends DurableObject<Env> {
           if (feed.feedUpdateTimestamp !== undefined) st.pythPublishTime = feed.feedUpdateTimestamp;
           this.dirtyAssets.add(symbol);
         }
+        this.updatePublishDelay();
         this.scheduleBroadcast();
       }
     } catch {}
@@ -562,15 +567,17 @@ export class PriceAggregator extends DurableObject<Env> {
     this.pollPythRest();
   }
 
+  // Cached REST URL (built once)
+  private pythRestUrl: string | null = null;
+
   private async pollPythRest() {
     if (!this.upstreamActive || this.usingPythPro) return;
     try {
-      const feedIds = Object.values(PYTH_HERMES_IDS);
-      const params = feedIds.map((id) => `ids[]=${id}`).join("&");
-      const res = await fetch(
-        `https://hermes.pyth.network/v2/updates/price/latest?${params}`,
-        { headers: { Accept: "application/json" } }
-      );
+      if (!this.pythRestUrl) {
+        const feedIds = Object.values(PYTH_HERMES_IDS);
+        this.pythRestUrl = `https://hermes.pyth.network/v2/updates/price/latest?${feedIds.map((id) => `ids[]=${id}`).join("&")}`;
+      }
+      const res = await fetch(this.pythRestUrl, { headers: { Accept: "application/json" } });
       if (res.ok) {
         const data = await res.json() as any;
         let updated = false;
@@ -581,7 +588,6 @@ export class PriceAggregator extends DurableObject<Env> {
           const publishTime = Number(pd.publish_time);
           const st = this.state.get(symbol);
           if (st && publishTime > st.pythPublishTime) {
-            // Only update if REST data is fresher than WS data
             const expo = Number(pd.expo);
             const mult = this.pow10(expo);
             st.pythPrice = Number(pd.price) * mult;
@@ -592,10 +598,14 @@ export class PriceAggregator extends DurableObject<Env> {
             updated = true;
           }
         }
-        if (updated) this.scheduleBroadcast();
+        if (updated) {
+          this.updatePublishDelay();
+          this.scheduleBroadcast();
+        }
       }
     } catch {}
-    this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 1000);
+    // REST is fallback — WS is primary. Poll every 2s, not 1s.
+    this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 2000);
   }
 
   private handleHermesMessage(raw: string | ArrayBuffer) {
@@ -618,6 +628,7 @@ export class PriceAggregator extends DurableObject<Env> {
           st.pythExpo = expo;
           st.pythPublishTime = publishTime;
           this.dirtyAssets.add(symbol);
+          this.updatePublishDelay();
           this.scheduleBroadcast();
         }
       }
@@ -670,7 +681,6 @@ export class PriceAggregator extends DurableObject<Env> {
       const data = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
       const msg = JSON.parse(data);
       if (msg.channel === "allMids" && msg.data?.mids) {
-        // Track HL WS update interval
         const now = Date.now();
         if (this.lastHlWsTime > 0) {
           this.hlWsIntervalMs = now - this.lastHlWsTime;
@@ -678,11 +688,17 @@ export class PriceAggregator extends DurableObject<Env> {
         this.lastHlWsTime = now;
 
         let updated = false;
+        const mids = msg.data.mids;
         for (const symbol of SYMBOLS) {
-          const mid = msg.data.mids[symbol];
+          const mid = mids[symbol];
           if (mid !== undefined) {
+            const price = parseFloat(mid);
             const st = this.state.get(symbol);
-            if (st) { st.markPrice = parseFloat(mid); this.dirtyAssets.add(symbol); updated = true; }
+            if (st && st.markPrice !== price) {
+              st.markPrice = price;
+              this.dirtyAssets.add(symbol);
+              updated = true;
+            }
           }
         }
         if (updated) this.scheduleBroadcast();
@@ -856,20 +872,30 @@ export class PriceAggregator extends DurableObject<Env> {
         const hlMeta = hlData[0];
         const hlCtxs = hlData[1];
         if (hlMeta?.universe && hlCtxs) {
+          let updated = false;
           for (let i = 0; i < hlMeta.universe.length; i++) {
             const name = hlMeta.universe[i].name;
             const st = this.state.get(name);
             if (st) {
               const ctx = hlCtxs[i];
-              st.fundingRate = parseFloat(ctx.funding);
-              st.openInterest = parseFloat(ctx.openInterest);
-              st.volume24h = parseFloat(ctx.dayNtlVlm);
-              st.prevDayPx = parseFloat(ctx.prevDayPx);
-              if (st.markPrice === 0) st.markPrice = parseFloat(ctx.markPx);
-              this.dirtyAssets.add(name);
+              const funding = parseFloat(ctx.funding);
+              const oi = parseFloat(ctx.openInterest);
+              const vol = parseFloat(ctx.dayNtlVlm);
+              const prevDay = parseFloat(ctx.prevDayPx);
+              // Only mark dirty if values actually changed
+              if (st.fundingRate !== funding || st.openInterest !== oi ||
+                  st.volume24h !== vol || st.prevDayPx !== prevDay) {
+                st.fundingRate = funding;
+                st.openInterest = oi;
+                st.volume24h = vol;
+                st.prevDayPx = prevDay;
+                if (st.markPrice === 0) st.markPrice = parseFloat(ctx.markPx);
+                this.dirtyAssets.add(name);
+                updated = true;
+              }
             }
           }
-          this.scheduleBroadcast();
+          if (updated) this.scheduleBroadcast();
         }
       }
     } catch (e) { console.error("Meta poll error:", e); }
@@ -936,7 +962,26 @@ export class PriceAggregator extends DurableObject<Env> {
     this.cachedJson = this.buildSnapshot();
   }
 
-  // ─── Broadcast throttle (16ms via microtask + timestamp floor) ─
+  // ─── Publish delay (recomputed on Pyth updates, not every broadcast) ─
+
+  private updatePublishDelay() {
+    const nowSec = Date.now() / 1000;
+    const delays: number[] = [];
+    for (const symbol of SYMBOLS) {
+      const st = this.state.get(symbol)!;
+      if (st.pythPublishTime > 0) {
+        const pubSec = this.usingPythPro ? st.pythPublishTime / 1e6 : st.pythPublishTime;
+        const delay = (nowSec - pubSec) * 1000;
+        if (delay > 0 && delay < 60000) delays.push(delay);
+      }
+    }
+    if (delays.length > 0) {
+      delays.sort((a, b) => a - b);
+      this.pythPublishDelayMs = delays[Math.floor(delays.length / 2)];
+    }
+  }
+
+  // ─── Broadcast throttle (16ms — direct call when elapsed, setTimeout otherwise) ─
 
   private scheduleBroadcast() {
     if (this.broadcastPending) return;
@@ -944,14 +989,11 @@ export class PriceAggregator extends DurableObject<Env> {
 
     const elapsed = performance.now() - this.lastBroadcastTime;
     if (elapsed >= 16) {
-      // Broadcast immediately via microtask (faster than setTimeout)
-      queueMicrotask(() => {
-        this.broadcastPending = false;
-        this.lastBroadcastTime = performance.now();
-        this.broadcast();
-      });
+      // Execute synchronously — no microtask queue overhead
+      this.broadcastPending = false;
+      this.lastBroadcastTime = performance.now();
+      this.broadcast();
     } else {
-      // Wait for remaining time
       this.broadcastTimer = setTimeout(() => {
         this.broadcastPending = false;
         this.lastBroadcastTime = performance.now();
@@ -1028,23 +1070,6 @@ export class PriceAggregator extends DurableObject<Env> {
     dirty.clear();
 
     const pythProUp = this.pythProConnected.some(Boolean);
-
-    // Compute median Pyth publish delay across assets
-    const delays: number[] = [];
-    const nowSec = now / 1000;
-    for (const symbol of SYMBOLS) {
-      const st = this.state.get(symbol)!;
-      if (st.pythPublishTime > 0) {
-        // Pro uses microseconds in feedUpdateTimestamp, Hermes uses seconds
-        const pubSec = this.usingPythPro ? st.pythPublishTime / 1e6 : st.pythPublishTime;
-        const delay = (nowSec - pubSec) * 1000; // ms
-        if (delay > 0 && delay < 60000) delays.push(delay);
-      }
-    }
-    if (delays.length > 0) {
-      delays.sort((a, b) => a - b);
-      this.pythPublishDelayMs = delays[Math.floor(delays.length / 2)];
-    }
 
     return JSON.stringify({
       assets: this.reusableAssets,
