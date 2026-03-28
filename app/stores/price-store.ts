@@ -82,6 +82,8 @@ const _deltaMap = new Map<string, any>();
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
+let restFallbackStartTimer: ReturnType<typeof setTimeout> | null = null;
+let restFallbackTimer: ReturnType<typeof setInterval> | null = null;
 let alive = false;
 let reconnectAttempt = 0;
 let tabVisible = true;
@@ -183,6 +185,53 @@ export function aggregateLine(
   return points;
 }
 
+// ─── REST Fallback helpers ────────────────────────────────────
+
+/** Apply a full snapshot to the store (shared by WS snapshot + REST fallback) */
+function applySnapshot(fullData: DashboardData, receivedAt: number) {
+  const { rawTicks, tickVersion } = usePriceStore.getState();
+  const lat = receivedAt - (fullData.serverTs ?? fullData.timestamp ?? receivedAt);
+
+  if (tabVisible) {
+    const ticks = appendTicks(rawTicks, fullData.assets, fullData.timestamp);
+    usePriceStore.setState({
+      data: fullData,
+      latencyMs: Math.max(0, lat),
+      rawTicks: ticks,
+      tickVersion: tickVersion + 1,
+    });
+  } else {
+    usePriceStore.setState({ data: fullData, latencyMs: Math.max(0, lat) });
+  }
+}
+
+function clearRestFallback() {
+  if (restFallbackStartTimer) { clearTimeout(restFallbackStartTimer); restFallbackStartTimer = null; }
+  if (restFallbackTimer) { clearInterval(restFallbackTimer); restFallbackTimer = null; }
+}
+
+function startRestFallback() {
+  clearRestFallback();
+  // Wait 5s before starting REST poll — give WS reconnect a chance
+  restFallbackStartTimer = setTimeout(() => {
+    restFallbackStartTimer = null;
+    restFallbackTimer = setInterval(async () => {
+      if (!tabVisible || !alive) return;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch("/api/prices", { signal: controller.signal });
+        clearTimeout(timer);
+        if (!alive) return; // Check again after async — disconnect may have fired
+        if (res.ok) {
+          const data = await res.json() as DashboardData;
+          if (alive) applySnapshot(data, Date.now());
+        }
+      } catch {}
+    }, 2000);
+  }, 5000);
+}
+
 // ─── Store ─────────────────────────────────────────────────
 
 export const usePriceStore = create<PriceStore>()((set, get) => ({
@@ -227,13 +276,14 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
 
       socket.onopen = () => {
         reconnectAttempt = 0;
+        clearRestFallback(); // Stop REST polling — WS is back
         set({ isConnected: true });
         if (pingTimer) clearInterval(pingTimer);
         pingTimer = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
             socket.send("ping");
           }
-        }, 30000);
+        }, 20000);
       };
 
       socket.onmessage = (event) => {
@@ -248,20 +298,7 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
           // Detect format: full snapshot has "assets", delta has "a"
           if (msg.assets) {
             // ── Full snapshot (initial connect or "refresh" response) ──
-            const fullData = msg as DashboardData;
-            const lat = receivedAt - (fullData.serverTs ?? fullData.timestamp ?? receivedAt);
-
-            if (tabVisible) {
-              const ticks = appendTicks(get().rawTicks, fullData.assets, fullData.timestamp);
-              set({
-                data: fullData,
-                latencyMs: Math.max(0, lat),
-                rawTicks: ticks,
-                tickVersion: get().tickVersion + 1,
-              });
-            } else {
-              set({ data: fullData, latencyMs: Math.max(0, lat) });
-            }
+            applySnapshot(msg as DashboardData, receivedAt);
           } else if (msg.a) {
             // ── Compact delta (ongoing 60fps updates) ──
             // Format: {a:[{s:"BTC",p:67000,c:12,m:67010,...}], t:ms, st:ms}
@@ -356,6 +393,8 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
           const jitter = Math.random() * 500;
           reconnectAttempt++;
           reconnectTimer = setTimeout(doConnect, baseDelay + jitter);
+          // Start REST fallback after 5s if WS doesn't reconnect
+          startRestFallback();
         }
       };
 
@@ -389,6 +428,8 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+
+    clearRestFallback();
 
     if (ws) {
       ws.close();

@@ -123,20 +123,30 @@ async function fetchAnalysisData(): Promise<AnalysisData> {
   }
 
   // Stage 1: Fetch leaderboard
-  const lbRes = await fetch("https://stats-data.hyperliquid.xyz/Mainnet/leaderboard");
-  if (!lbRes.ok) throw new Error("Failed to fetch leaderboard");
-  const lb = await lbRes.json() as {
-    leaderboardRows: {
-      ethAddress: string;
-      accountValue: string;
-      displayName: string | null;
-      windowPerformances: [string, { pnl: string; roi: string }][];
-    }[];
-  };
-
-  const topTraders = lb.leaderboardRows
-    .sort((a, b) => parseFloat(b.accountValue) - parseFloat(a.accountValue))
-    .slice(0, TOP_N_TRADERS);
+  let topTraders: {
+    ethAddress: string;
+    accountValue: string;
+    displayName: string | null;
+    windowPerformances: [string, { pnl: string; roi: string }][];
+  }[] = [];
+  try {
+    const lbRes = await fetch("https://stats-data.hyperliquid.xyz/Mainnet/leaderboard");
+    if (lbRes.ok) {
+      const lb = await lbRes.json() as {
+        leaderboardRows: {
+          ethAddress: string;
+          accountValue: string;
+          displayName: string | null;
+          windowPerformances: [string, { pnl: string; roi: string }][];
+        }[];
+      };
+      topTraders = lb.leaderboardRows
+        .sort((a, b) => parseFloat(b.accountValue) - parseFloat(a.accountValue))
+        .slice(0, TOP_N_TRADERS);
+    }
+  } catch {
+    // Leaderboard API down — continue with empty traders
+  }
 
   // Stage 2: Fetch positions for each trader in parallel
   const posResults = await Promise.allSettled(

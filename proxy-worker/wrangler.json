@@ -6,6 +6,11 @@
 
   "placement": { "mode": "smart" },
 
+  "vars": {
+    "PRIMARY_ORIGIN": "https://deltascope-btatu5.camelai.app",
+    "SECONDARY_ORIGIN": "https://deltascope-btatu5.camelai.app"
+  },
+
   "routes": [
     { "pattern": "deltascope.site/*", "zone_name": "deltascope.site" },
     { "pattern": "www.deltascope.site/*", "zone_name": "deltascope.site" }

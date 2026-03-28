@@ -52,6 +52,7 @@ function TVChartInner({
   const chartTypeRef = useRef(chartType);
   const lastTickVersionRef = useRef(0);
   const seededRef = useRef(false); // Has chart received initial setData with real data?
+  const prevChartTypeRef = useRef(chartType); // Track previous chartType for swap detection
 
   // Keep refs in sync with props
   symbolRef.current = symbol;
@@ -279,9 +280,8 @@ function TVChartInner({
   useEffect(() => {
     if (!chartRef.current || !modulesRef.current || !seriesRef.current) return;
 
-    const needsSeriesSwap = chartType !== chartTypeRef.current;
-    // chartTypeRef is already synced above, but we need the old value check
-    // Actually refs are synced at top of render, so use a separate prev tracker
+    const needsSeriesSwap = chartType !== prevChartTypeRef.current;
+    prevChartTypeRef.current = chartType;
     const sym = symbol;
     const tf = timeframe;
 

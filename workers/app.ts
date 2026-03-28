@@ -76,9 +76,51 @@ function isValidOrigin(request: Request): boolean {
   }
 }
 
+// ─── DO Failover helper ─────────────────────────────────
+// Primary: "global", Standby: "global-standby" (same class, independent instance)
+// Standby maintains its own upstream connections via alarm loop.
+const DO_PRIMARY = "global";
+const DO_STANDBY = "global-standby";
+const DO_TIMEOUT_MS = 3000;
+let standbyWarmed = false;
+
+async function fetchWithFailover(
+  env: Env,
+  buildRequest: () => Request,
+): Promise<Response> {
+  const primaryStub = env.PRICE_AGGREGATOR.get(
+    env.PRICE_AGGREGATOR.idFromName(DO_PRIMARY),
+  );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DO_TIMEOUT_MS);
+  try {
+    const res = await primaryStub.fetch(buildRequest(), { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.status >= 500) throw new Error("primary-5xx");
+    return res;
+  } catch {
+    clearTimeout(timer);
+    const standbyStub = env.PRICE_AGGREGATOR.get(
+      env.PRICE_AGGREGATOR.idFromName(DO_STANDBY),
+    );
+    return standbyStub.fetch(buildRequest());
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // ─── Warm up standby DO on first request (one-time) ───
+    if (!standbyWarmed) {
+      standbyWarmed = true;
+      const standbyStub = env.PRICE_AGGREGATOR.get(
+        env.PRICE_AGGREGATOR.idFromName(DO_STANDBY),
+      );
+      ctx.waitUntil(
+        standbyStub.fetch(new Request(new URL("/prices", request.url))).catch(() => {}),
+      );
+    }
 
     // ─── Static assets: immutable cache (hashed filenames) ───
     if (url.pathname.startsWith("/assets/")) {
@@ -103,56 +145,58 @@ export default {
       if (!isValidOrigin(request)) {
         return new Response("Forbidden", { status: 403 });
       }
-      const id = env.PRICE_AGGREGATOR.idFromName("global");
-      const stub = env.PRICE_AGGREGATOR.get(id);
-      return stub.fetch(new Request(new URL("/ws/prices", request.url), { headers: request.headers }));
+      const wsReq = () => new Request(new URL("/ws/prices", request.url), { headers: request.headers });
+      try {
+        const primaryStub = env.PRICE_AGGREGATOR.get(
+          env.PRICE_AGGREGATOR.idFromName(DO_PRIMARY),
+        );
+        return await primaryStub.fetch(wsReq());
+      } catch {
+        // Failover WS to standby
+        const standbyStub = env.PRICE_AGGREGATOR.get(
+          env.PRICE_AGGREGATOR.idFromName(DO_STANDBY),
+        );
+        return standbyStub.fetch(wsReq());
+      }
     }
 
-    // ─── REST API endpoints → route to PriceAggregator DO ───
-    // Edge-cached via CF Cache API to avoid DO round-trip on every request.
-    // The DO is smart-placed near upstream APIs (Pyth/HL), which is optimal
-    // for upstream latency but means user→DO round-trip is high.
-    // Edge caching serves responses from the nearest CF PoP instead.
-    const id = env.PRICE_AGGREGATOR.idFromName("global");
-    const cache = caches.default;
+    // ─── REST API endpoints → route to PriceAggregator DO with failover ───
 
     if (url.pathname === "/api/prices") {
-      // Check edge cache first (keyed by URL, per-PoP)
-      const cacheKey = new Request(request.url, { method: "GET" });
-      let cached = await cache.match(cacheKey);
-      if (cached) return addSecurityHeaders(cached);
-
-      const stub = env.PRICE_AGGREGATOR.get(id);
-      const res = await stub.fetch(new Request(new URL("/prices", request.url), { headers: request.headers }));
+      const res = await fetchWithFailover(env, () =>
+        new Request(new URL("/prices", request.url), { headers: request.headers }),
+      );
       const response = addSecurityHeaders(new Response(res.body, res));
-      response.headers.set("Cache-Control", "public, s-maxage=1, stale-while-revalidate=2");
-      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      response.headers.set("Cache-Control", "public, max-age=1, stale-while-revalidate=2");
       return response;
     }
 
     if (url.pathname === "/api/latency") {
-      const cacheKey = new Request(request.url, { method: "GET" });
-      let cached = await cache.match(cacheKey);
-      if (cached) return addSecurityHeaders(cached);
-
-      const stub = env.PRICE_AGGREGATOR.get(id);
-      const res = await stub.fetch(new Request(new URL("/latency", request.url), { headers: request.headers }));
+      const res = await fetchWithFailover(env, () =>
+        new Request(new URL("/latency", request.url), { headers: request.headers }),
+      );
       const response = addSecurityHeaders(new Response(res.body, res));
-      response.headers.set("Cache-Control", "public, s-maxage=2, stale-while-revalidate=5");
-      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      response.headers.set("Cache-Control", "public, max-age=2, stale-while-revalidate=5");
       return response;
     }
 
     if (url.pathname === "/api/hip3") {
-      const cacheKey = new Request(request.url, { method: "GET" });
-      let cached = await cache.match(cacheKey);
-      if (cached) return addSecurityHeaders(cached);
-
-      const stub = env.PRICE_AGGREGATOR.get(id);
-      const res = await stub.fetch(new Request(new URL("/hip3", request.url), { headers: request.headers }));
+      const res = await fetchWithFailover(env, () =>
+        new Request(new URL("/hip3", request.url), { headers: request.headers }),
+      );
       const response = addSecurityHeaders(new Response(res.body, res));
-      response.headers.set("Cache-Control", "public, s-maxage=5, stale-while-revalidate=10");
-      ctx.waitUntil(cache.put(cacheKey, response.clone()));
+      response.headers.set("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+      return response;
+    }
+
+    if (url.pathname === "/api/history") {
+      const doUrl = new URL("/history", request.url);
+      doUrl.search = url.search;
+      const res = await fetchWithFailover(env, () =>
+        new Request(doUrl, { headers: request.headers }),
+      );
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, max-age=1, stale-while-revalidate=5");
       return response;
     }
 

@@ -45,24 +45,34 @@ function getSessionsStub(context: Route.LoaderArgs["context"]) {
 export async function loader({ request, context }: Route.LoaderArgs) {
   const url = new URL(request.url);
   const sessionId = url.searchParams.get("session");
-  const stub = getSessionsStub(context);
 
-  if (!sessionId) {
+  try {
+    const stub = getSessionsStub(context);
+
+    if (!sessionId) {
+      const newId = crypto.randomUUID();
+      await stub.ensureSession(newId);
+      url.searchParams.set("session", newId);
+      throw redirect(url.pathname + url.search);
+    }
+
+    const sessions = await stub.listSessions();
+    const isOwned = sessions.some((s) => s.id === sessionId);
+
+    if (!isOwned) {
+      url.searchParams.delete("session");
+      throw redirect(url.pathname);
+    }
+
+    return { sessionId, sessions };
+  } catch (e) {
+    // Re-throw redirects
+    if (e instanceof Response) throw e;
+    // DO failure — start fresh session
     const newId = crypto.randomUUID();
-    await stub.ensureSession(newId);
     url.searchParams.set("session", newId);
     throw redirect(url.pathname + url.search);
   }
-
-  const sessions = await stub.listSessions();
-  const isOwned = sessions.some((s) => s.id === sessionId);
-
-  if (!isOwned) {
-    url.searchParams.delete("session");
-    throw redirect(url.pathname);
-  }
-
-  return { sessionId, sessions };
 }
 
 // --- Action ---

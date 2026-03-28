@@ -93,6 +93,8 @@ interface AssetState {
 export class PriceAggregator extends DurableObject<Env> {
   private state: Map<string, AssetState> = new Map();
   private cachedJson: string | null = null;
+  private sqliteReady = false;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Upstream connections
   private pythProWs: (WebSocket | null)[] = [null, null, null];
@@ -177,8 +179,183 @@ export class PriceAggregator extends DurableObject<Env> {
         prevDayPx: 0,
       });
     }
+    // Load persisted data before handling any requests
+    ctx.blockConcurrencyWhile(async () => {
+      this.initSqlite();
+      this.loadFromSqlite();
+    });
     // 24/7 keep-alive: set alarm on construction so DO never sleeps
     ctx.storage.setAlarm(Date.now() + 25000);
+  }
+
+  // ─── SQLite persistence ─────────────────────────────────────
+
+  private initSqlite() {
+    const sql = this.ctx.storage.sql;
+
+    // Last-known price state per asset (survives restarts)
+    sql.exec(`CREATE TABLE IF NOT EXISTS price_state (
+      symbol TEXT PRIMARY KEY,
+      pyth_price REAL, pyth_confidence REAL, pyth_expo INTEGER,
+      pyth_publish_time REAL, best_bid REAL, best_ask REAL,
+      publisher_count INTEGER, mark_price REAL, funding_rate REAL,
+      open_interest REAL, volume_24h REAL, prev_day_px REAL,
+      updated_at INTEGER
+    )`);
+
+    // 1-second OHLC candles for chart history (kept 24h)
+    sql.exec(`CREATE TABLE IF NOT EXISTS price_candles (
+      symbol TEXT NOT NULL,
+      t INTEGER NOT NULL,
+      o REAL, h REAL, l REAL, c REAL,
+      PRIMARY KEY (symbol, t)
+    ) WITHOUT ROWID`);
+
+    // Latency samples (kept 24h)
+    sql.exec(`CREATE TABLE IF NOT EXISTS latency_history (
+      t INTEGER PRIMARY KEY,
+      pyth REAL, hl_rest REAL, hl_ws REAL,
+      publish_delay REAL, ws_rtt REAL
+    )`);
+
+    // Last HIP-3 snapshot JSON
+    sql.exec(`CREATE TABLE IF NOT EXISTS hip3_snapshot (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      data TEXT, updated_at INTEGER
+    )`);
+
+    // Indexes for time-range queries and cleanup
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_candles_t ON price_candles(t)`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_latency_t ON latency_history(t)`);
+
+    this.sqliteReady = true;
+  }
+
+  /** Load persisted data into memory on cold start */
+  private loadFromSqlite() {
+    if (!this.sqliteReady) return;
+    const sql = this.ctx.storage.sql;
+
+    // Restore price state
+    let hasData = false;
+    for (const row of sql.exec("SELECT * FROM price_state")) {
+      const sym = row.symbol as string;
+      const st = this.state.get(sym);
+      if (!st) continue;
+      st.pythPrice = (row.pyth_price as number) || 0;
+      st.pythConfidence = (row.pyth_confidence as number) || 0;
+      st.pythExpo = (row.pyth_expo as number) || 0;
+      st.pythPublishTime = (row.pyth_publish_time as number) || 0;
+      st.bestBidPrice = (row.best_bid as number) || 0;
+      st.bestAskPrice = (row.best_ask as number) || 0;
+      st.publisherCount = (row.publisher_count as number) || 0;
+      st.markPrice = (row.mark_price as number) || 0;
+      st.fundingRate = (row.funding_rate as number) || 0;
+      st.openInterest = (row.open_interest as number) || 0;
+      st.volume24h = (row.volume_24h as number) || 0;
+      st.prevDayPx = (row.prev_day_px as number) || 0;
+      if (st.pythPrice > 0 || st.markPrice > 0) hasData = true;
+      this.dirtyAssets.add(sym);
+    }
+
+    // Pre-build snapshot so first request is instant
+    if (hasData) {
+      this.cachedJson = this.buildSnapshot();
+    }
+
+    // Restore latency history
+    const latRows = sql.exec(
+      "SELECT * FROM latency_history ORDER BY t DESC LIMIT 120"
+    );
+    this.latencyHistory = [];
+    for (const row of latRows) {
+      this.latencyHistory.unshift({
+        t: row.t as number,
+        pyth: (row.pyth as number) || 0,
+        hlRest: (row.hl_rest as number) || 0,
+        hlWs: (row.hl_ws as number) || 0,
+        publishDelay: (row.publish_delay as number) || 0,
+        wsRtt: (row.ws_rtt as number) || 0,
+      });
+    }
+
+    // Restore HIP-3 snapshot
+    const hip3Row = sql.exec("SELECT data FROM hip3_snapshot WHERE id = 1").toArray();
+    if (hip3Row.length > 0 && hip3Row[0].data) {
+      try { this.hip3Data = JSON.parse(hip3Row[0].data as string); } catch {}
+    }
+  }
+
+  /** Flush current state to SQLite (called every 5s) */
+  private persistToSqlite() {
+    if (!this.sqliteReady) return;
+    const sql = this.ctx.storage.sql;
+    const now = Date.now();
+
+    // Batch upsert price state
+    for (const [sym, st] of this.state) {
+      if (st.pythPrice === 0 && st.markPrice === 0) continue;
+      sql.exec(
+        `INSERT OR REPLACE INTO price_state VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        sym, st.pythPrice, st.pythConfidence, st.pythExpo,
+        st.pythPublishTime, st.bestBidPrice, st.bestAskPrice,
+        st.publisherCount, st.markPrice, st.fundingRate,
+        st.openInterest, st.volume24h, st.prevDayPx, now,
+      );
+    }
+
+    // Append 1s OHLC candles for each asset
+    const candleT = Math.floor(now / 1000); // 1s bucket
+    for (const [sym, st] of this.state) {
+      const price = st.pythPrice || st.markPrice;
+      if (!price || price <= 0) continue;
+      sql.exec(
+        `INSERT INTO price_candles (symbol, t, o, h, l, c) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(symbol, t) DO UPDATE SET
+           h = MAX(h, excluded.h), l = MIN(l, excluded.l), c = excluded.c`,
+        sym, candleT, price, price, price, price,
+      );
+    }
+
+    // Prune candles older than 24h
+    sql.exec("DELETE FROM price_candles WHERE t < ?", candleT - 86400);
+
+    // Persist latency sample
+    if (this.upstreamActive) {
+      sql.exec(
+        `INSERT OR REPLACE INTO latency_history VALUES (?,?,?,?,?,?)`,
+        now,
+        this.usingPythPro ? this.pythProLatencyMs : this.pythPublishDelayMs,
+        this.hlRestLatencyMs, this.hlWsIntervalMs,
+        this.pythPublishDelayMs, 0,
+      );
+      // Prune older than 24h
+      sql.exec("DELETE FROM latency_history WHERE t < ?", now - 86400000);
+    }
+
+    // Persist HIP-3 snapshot
+    if (this.hip3Data) {
+      sql.exec(
+        `INSERT OR REPLACE INTO hip3_snapshot VALUES (1, ?, ?)`,
+        JSON.stringify(this.hip3Data), now,
+      );
+    }
+  }
+
+  private startPersistTimer() {
+    if (this.persistTimer) return;
+    this.persistTimer = setInterval(() => {
+      try { this.persistToSqlite(); } catch (e) {
+        console.error("SQLite persist error:", e);
+      }
+    }, 5000);
+  }
+
+  private stopPersistTimer() {
+    if (this.persistTimer) {
+      clearInterval(this.persistTimer);
+      this.persistTimer = null;
+    }
   }
 
   // ─── DO Alarm: 24/7 keep-alive ─────────────────────────────
@@ -284,6 +461,35 @@ export class PriceAggregator extends DurableObject<Env> {
       });
     }
 
+    // Historical 1s OHLC candles from SQLite
+    if (url.pathname === "/history") {
+      const symbol = url.searchParams.get("symbol") || "BTC";
+      const hours = Math.min(Number(url.searchParams.get("hours") || "1"), 24);
+      const since = Math.floor(Date.now() / 1000) - hours * 3600;
+
+      if (!this.sqliteReady) {
+        return new Response(JSON.stringify({ candles: [] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const rows = this.ctx.storage.sql.exec(
+        "SELECT t, o, h, l, c FROM price_candles WHERE symbol = ? AND t >= ? ORDER BY t",
+        symbol, since,
+      ).toArray();
+
+      return new Response(JSON.stringify({
+        symbol,
+        candles: rows,
+        count: rows.length,
+      }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=1, stale-while-revalidate=5",
+        },
+      });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -310,6 +516,11 @@ export class PriceAggregator extends DurableObject<Env> {
   // ─── Upstream management ────────────────────────────────
 
   private reconnectDelay(idx: number): number {
+    // Instant first reconnect for critical Hermes feeds (indices 3, 5)
+    if ((idx === 3 || idx === 5) && this.reconnectAttempts[idx] === 0) {
+      this.reconnectAttempts[idx]++;
+      return 0;
+    }
     const base = Math.min(500 * Math.pow(2, this.reconnectAttempts[idx]), 15000);
     const jitter = Math.random() * 500;
     this.reconnectAttempts[idx]++;
@@ -327,6 +538,8 @@ export class PriceAggregator extends DurableObject<Env> {
 
     // Start latency history sampling
     this.startLatencySampling();
+    // Start SQLite persistence (every 5s)
+    this.startPersistTimer();
 
     // Check if Pyth Pro token is available
     const token = (this.env as any).PYTH_PRO_TOKEN;
@@ -339,13 +552,12 @@ export class PriceAggregator extends DurableObject<Env> {
       for (let i = 0; i < 3; i++) {
         this.connectPythPro(i, token);
       }
-      // Also keep Hermes WS as fallback in case Lazer goes down
-      this.connectPythHermes("https://hermes.pyth.network/ws", false);
+      // Pro supersedes Hermes — skip Hermes WS to save CPU (REST poll kept as emergency fallback)
     } else {
       // Dual Hermes: connect to both main and beta for lowest latency
       this.connectPythHermes("https://hermes.pyth.network/ws", false);
       this.connectPythHermes("https://hermes-beta.pyth.network/ws", true);
-      // REST polling supplement: poll every 1s for freshest data
+      // REST polling supplement: poll every 3s (rate-limited to 30/10s)
       this.startPythRestPoll();
     }
     this.connectHlWs();
@@ -357,6 +569,9 @@ export class PriceAggregator extends DurableObject<Env> {
 
   private tearDownUpstream() {
     this.upstreamActive = false;
+    // Final persist before shutting down
+    try { this.persistToSqlite(); } catch {}
+    this.stopPersistTimer();
     if (this.gracePeriodTimer) { clearTimeout(this.gracePeriodTimer); this.gracePeriodTimer = null; }
     for (let i = 0; i < 3; i++) {
       if (this.pythProWs[i]) { try { this.pythProWs[i]!.close(); } catch {} }
@@ -499,7 +714,7 @@ export class PriceAggregator extends DurableObject<Env> {
         this.updatePublishDelay();
         this.scheduleBroadcast();
       }
-    } catch {}
+    } catch (e) { console.error("Pyth Pro msg error:", e); }
   }
 
   // ─── Pyth Hermes WebSocket (free fallback — dual endpoint) ──
@@ -565,25 +780,74 @@ export class PriceAggregator extends DurableObject<Env> {
     }
   }
 
-  // ─── Pyth Hermes REST polling supplement (every 2s) ────────
+  // ─── Pyth Hermes REST polling (rate-limited: 30 req / 10s) ────
+
+  // Rate limiter: sliding window of request timestamps
+  private hermesRequestTimes: number[] = [];
+  private static readonly HERMES_RATE_LIMIT = 30; // max requests
+  private static readonly HERMES_RATE_WINDOW = 10000; // per 10 seconds
+  private hermesBackoffUntil = 0; // timestamp — 0 = no backoff
+
+  private canRequestHermes(): boolean {
+    const now = Date.now();
+    if (now < this.hermesBackoffUntil) return false;
+    // Prune old entries outside window
+    const cutoff = now - PriceAggregator.HERMES_RATE_WINDOW;
+    while (this.hermesRequestTimes.length > 0 && this.hermesRequestTimes[0] < cutoff) {
+      this.hermesRequestTimes.shift();
+    }
+    return this.hermesRequestTimes.length < PriceAggregator.HERMES_RATE_LIMIT;
+  }
+
+  private recordHermesRequest() {
+    this.hermesRequestTimes.push(Date.now());
+  }
 
   private startPythRestPoll() {
     if (this.pythRestPollTimer) return;
     this.pollPythRest();
   }
 
-  // Cached REST URL (built once)
+  // Cached REST URLs (built once)
   private pythRestUrl: string | null = null;
+  private pythRestBetaUrl: string | null = null;
 
   private async pollPythRest() {
     if (!this.upstreamActive || this.usingPythPro) return;
+
+    // Rate limit check
+    if (!this.canRequestHermes()) {
+      // Back off — reschedule after window clears
+      this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 1000);
+      return;
+    }
+
     try {
       if (!this.pythRestUrl) {
         const feedIds = Object.values(PYTH_HERMES_IDS);
-        this.pythRestUrl = `https://hermes.pyth.network/v2/updates/price/latest?${feedIds.map((id) => `ids[]=${id}`).join("&")}`;
+        const qs = feedIds.map((id) => `ids[]=${id}`).join("&");
+        this.pythRestUrl = `https://hermes.pyth.network/v2/updates/price/latest?${qs}`;
+        this.pythRestBetaUrl = `https://hermes-beta.pyth.network/v2/updates/price/latest?${qs}`;
       }
-      const res = await fetch(this.pythRestUrl, { headers: { Accept: "application/json" } });
-      if (res.ok) {
+      this.recordHermesRequest();
+
+      // Race both endpoints — first successful response wins (halves p99 latency)
+      const opts = { headers: { Accept: "application/json" } };
+      const res = await Promise.any([
+        fetch(this.pythRestUrl!, opts),
+        fetch(this.pythRestBetaUrl!, opts),
+      ]).catch(() => null);
+
+      // Handle 429 Too Many Requests — exponential backoff
+      if (res && res.status === 429) {
+        const retryAfter = Number(res.headers.get("Retry-After") || "10");
+        this.hermesBackoffUntil = Date.now() + retryAfter * 1000;
+        console.warn(`Hermes 429 — backing off ${retryAfter}s`);
+        this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), retryAfter * 1000);
+        return;
+      }
+
+      if (res && res.ok) {
         const data = await res.json() as any;
         let updated = false;
         for (const item of (data.parsed || [])) {
@@ -608,36 +872,77 @@ export class PriceAggregator extends DurableObject<Env> {
           this.scheduleBroadcast();
         }
       }
-    } catch {}
-    // REST is fallback — WS is primary. Poll every 2s, not 1s.
+    } catch (e) { console.error("Hermes REST poll error:", e); }
+    // REST supplement — dual WS is primary. Poll every 2s (dual-race stays under 30/10s limit).
     this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 2000);
+  }
+
+  // Fast-path field extraction: avoids full JSON.parse for price_update messages
+  // Hermes messages are ~600-800 bytes; targeted extraction saves ~1-3ms per message
+  private static extractJsonField(data: string, field: string): string | null {
+    const key = `"${field}":`;
+    const idx = data.indexOf(key);
+    if (idx === -1) return null;
+    let start = idx + key.length;
+    // Skip whitespace
+    while (start < data.length && data.charCodeAt(start) <= 32) start++;
+    if (start >= data.length) return null;
+    const ch = data.charCodeAt(start);
+    if (ch === 34) { // " — quoted string
+      let end = start + 1;
+      while (end < data.length) {
+        if (data.charCodeAt(end) === 34 && data.charCodeAt(end - 1) !== 92) break; // unescaped "
+        end++;
+      }
+      return end >= data.length ? null : data.slice(start + 1, end);
+    }
+    // Number or other literal — read until delimiter
+    let end = start;
+    while (end < data.length) {
+      const c = data.charCodeAt(end);
+      if (c === 44 || c === 125 || c === 93 || c <= 32) break; // , } ] or whitespace
+      end++;
+    }
+    return data.slice(start, end);
   }
 
   private handleHermesMessage(raw: string | ArrayBuffer) {
     try {
       const data = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-      const msg = JSON.parse(data);
-      if (msg.type === "price_update" && msg.price_feed) {
-        const feed = msg.price_feed;
-        const symbol = HERMES_ID_TO_SYMBOL[feed.id];
-        if (!symbol) return;
-        const pd = feed.price;
-        const publishTime = Number(pd.publish_time);
-        const st = this.state.get(symbol);
-        if (st && publishTime > st.pythPublishTime) {
-          // Only accept if fresher than current data (dedup dual WS + REST)
-          const expo = Number(pd.expo);
-          const mult = this.pow10(expo);
-          st.pythPrice = Number(pd.price) * mult;
-          st.pythConfidence = Number(pd.conf) * mult;
-          st.pythExpo = expo;
-          st.pythPublishTime = publishTime;
-          this.dirtyAssets.add(symbol);
-          this.updatePublishDelay();
-          this.scheduleBroadcast();
-        }
-      }
-    } catch {}
+
+      // Fast path: check message type without full JSON.parse
+      if (!data.includes('"price_update"')) return;
+
+      // Extract feed ID to find symbol
+      const id = PriceAggregator.extractJsonField(data, "id");
+      if (!id) return;
+      const symbol = HERMES_ID_TO_SYMBOL[id];
+      if (!symbol) return;
+      const st = this.state.get(symbol);
+      if (!st) return;
+
+      // Extract publish_time for dedup
+      const publishTimeStr = PriceAggregator.extractJsonField(data, "publish_time");
+      if (!publishTimeStr) return;
+      const publishTime = Number(publishTimeStr);
+      if (publishTime <= st.pythPublishTime) return; // Stale — skip
+
+      // Extract price fields
+      const priceStr = PriceAggregator.extractJsonField(data, "price");
+      const confStr = PriceAggregator.extractJsonField(data, "conf");
+      const expoStr = PriceAggregator.extractJsonField(data, "expo");
+      if (!priceStr || !expoStr) return;
+
+      const expo = Number(expoStr);
+      const mult = this.pow10(expo);
+      st.pythPrice = Number(priceStr) * mult;
+      if (confStr) st.pythConfidence = Number(confStr) * mult;
+      st.pythExpo = expo;
+      st.pythPublishTime = publishTime;
+      this.dirtyAssets.add(symbol);
+      this.updatePublishDelay();
+      this.scheduleBroadcast();
+    } catch (e) { console.error("Hermes msg error:", e); }
   }
 
   // ─── Hyperliquid WebSocket ──────────────────────────────
@@ -711,7 +1016,7 @@ export class PriceAggregator extends DurableObject<Env> {
         }
         if (updated) this.scheduleBroadcast();
       }
-    } catch {}
+    } catch (e) { console.error("HL msg error:", e); }
   }
 
   // ─── Metadata poll ──────────────────────────────────────

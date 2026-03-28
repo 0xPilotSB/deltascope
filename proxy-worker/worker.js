@@ -6,7 +6,8 @@
  */
 
 // ─── Configuration ─────────────────────────────────────────
-const ORIGIN = "https://deltascope-btatu5.camelai.app";
+// Dual-origin: failover from primary to secondary on 5xx/timeout
+const FAILOVER_TIMEOUT_MS = 3000;
 
 // Assets that contain content hashes — safe to cache forever
 const IMMUTABLE_PATTERN = /\/assets\/.*[-.][\da-zA-Z]{6,}\.(js|css|woff2?|png|jpg|svg)$/;
@@ -15,7 +16,7 @@ const IMMUTABLE_PATTERN = /\/assets\/.*[-.][\da-zA-Z]{6,}\.(js|css|woff2?|png|jp
 const STATIC_PATTERN = /\.(ico|svg|png|jpg|jpeg|webp|gif|woff2?|ttf|eot)$/;
 
 // API endpoints — short cache with stale-while-revalidate
-const API_PATTERN = /^\/api\/(prices|hip3|latency|orderbook|funding)/;
+const API_PATTERN = /^\/api\/(prices|hip3|latency|history|orderbook|funding)/;
 
 // Security headers applied to all responses
 const SECURITY_HEADERS = {
@@ -27,13 +28,13 @@ const SECURITY_HEADERS = {
   "X-DNS-Prefetch-Control": "on",
 };
 
-// CSP — allow self + upstream data sources
+// CSP — allow self + upstream data sources + deltascope.site WS
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  "font-src 'self' https://fonts.gstatic.com",
-  "connect-src 'self' wss: https://hermes.pyth.network https://hermes-beta.pyth.network https://api.hyperliquid.xyz",
+  "script-src 'self' 'unsafe-inline' https://unpkg.com",
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
+  "connect-src 'self' wss: https://hermes.pyth.network https://hermes-beta.pyth.network https://api.hyperliquid.xyz https://deltascope.site wss://deltascope.site",
   "img-src 'self' data: blob:",
   "frame-ancestors 'none'",
 ].join("; ");
@@ -42,17 +43,26 @@ const CSP = [
 
 export default {
   async fetch(request, env, ctx) {
+    const PRIMARY_ORIGIN = env.PRIMARY_ORIGIN || "https://deltascope-btatu5.camelai.app";
+    const SECONDARY_ORIGIN = env.SECONDARY_ORIGIN || "https://deltascope-btatu5.camelai.app";
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // ── WebSocket upgrade — pass through directly ──
+    // ── WebSocket upgrade — try primary, failover to secondary ──
     if (request.headers.get("Upgrade") === "websocket") {
-      const originUrl = new URL(pathname + url.search, ORIGIN);
-      const originReq = new Request(originUrl, {
-        method: request.method,
-        headers: rewriteHeaders(request.headers, url.hostname),
-      });
-      return fetch(originReq);
+      const origins = [PRIMARY_ORIGIN, SECONDARY_ORIGIN];
+      for (const origin of origins) {
+        try {
+          const originUrl = new URL(pathname + url.search, origin);
+          const originReq = new Request(originUrl, {
+            method: request.method,
+            headers: rewriteHeaders(request.headers, url.hostname, origin),
+          });
+          const res = await fetch(originReq);
+          if (res.status < 500) return res;
+        } catch {}
+      }
+      return new Response("All origins unavailable", { status: 502 });
     }
 
     // ── Try edge cache first for cacheable requests ──
@@ -64,27 +74,41 @@ export default {
       if (cached) return addSecurityHeaders(cached);
     }
 
-    // ── Proxy to origin ──
-    const originUrl = new URL(pathname + url.search, ORIGIN);
-    const originReq = new Request(originUrl, {
-      method: request.method,
-      headers: rewriteHeaders(request.headers, url.hostname),
-      body: request.method !== "GET" && request.method !== "HEAD" ? request.body : undefined,
-      redirect: "manual",
-    });
-
+    // ── Proxy to origin with failover ──
+    const origins = [PRIMARY_ORIGIN, SECONDARY_ORIGIN];
     let response;
-    try {
-      response = await fetch(originReq, {
-        cf: {
-          // Cloudflare optimizations
-          minify: { javascript: true, css: true, html: true },
-          mirage: true,      // Image optimization
-          polish: "lossy",   // Image compression
-        },
-      });
-    } catch (err) {
-      return new Response("Origin unavailable", { status: 502 });
+
+    for (const origin of origins) {
+      try {
+        const originUrl = new URL(pathname + url.search, origin);
+        const originReq = new Request(originUrl, {
+          method: request.method,
+          headers: rewriteHeaders(request.headers, url.hostname, origin),
+          body: request.method !== "GET" && request.method !== "HEAD" ? request.body : undefined,
+          redirect: "manual",
+        });
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), FAILOVER_TIMEOUT_MS);
+        response = await fetch(originReq, {
+          signal: controller.signal,
+          cf: {
+            minify: { javascript: true, css: true, html: true },
+            mirage: true,
+            polish: "lossy",
+          },
+        });
+        clearTimeout(timer);
+
+        if (response.status < 500) break; // Success — use this response
+      } catch {
+        // Timeout or network error — try next origin
+        continue;
+      }
+    }
+
+    if (!response) {
+      return new Response("All origins unavailable", { status: 502 });
     }
 
     // ── Build response with optimized headers ──
@@ -118,9 +142,9 @@ export default {
 
 // ─── Helpers ───────────────────────────────────────────────
 
-function rewriteHeaders(headers, hostname) {
+function rewriteHeaders(headers, hostname, origin) {
   const rewritten = new Headers(headers);
-  rewritten.set("Host", new URL(ORIGIN).hostname);
+  rewritten.set("Host", new URL(origin).hostname);
   rewritten.set("X-Forwarded-Host", hostname);
   rewritten.set("X-Real-IP", headers.get("CF-Connecting-IP") || "");
   // Remove CF headers that would confuse origin
