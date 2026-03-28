@@ -1008,25 +1008,23 @@ export class PriceAggregator extends DurableObject<Env> {
   private broadcastCount = 0;
 
   private broadcast() {
-    this.dirtyAssets.clear();
-    const snapshot = this.buildSnapshot();
-    this.cachedJson = snapshot; // Reuse for REST too
+    const delta = this.buildDelta();
+    this.cachedJson = null; // Invalidate — rebuilt lazily on next REST request
     for (const ws of this.ctx.getWebSockets()) {
-      try { ws.send(snapshot); } catch {}
+      try { ws.send(delta); } catch {}
     }
     this.broadcastCount++;
   }
 
-  // ─── Compact delta payload for WS (short keys, ALL 8 assets every frame) ─
+  // ─── Compact delta payload for WS (short keys, dirty assets only) ─
   // Format: {"a":[{"s":"BTC","p":67000,"c":12,"m":67010,...}],"t":1234,"st":1234}
-  // ~700-1200 bytes vs ~3400 bytes for full snapshot = ~65% smaller
-  // Sends all assets every frame — simpler client merge, no stale data risk
+  // ~200-400 bytes per frame = ~85% smaller than full snapshot
 
   private buildDelta(): string {
     const now = Date.now();
     const deltaAssets: any[] = [];
 
-    for (const symbol of SYMBOLS) {
+    for (const symbol of this.dirtyAssets) {
       const st = this.state.get(symbol);
       if (!st || (st.pythPrice === 0 && st.markPrice === 0)) continue;
 
