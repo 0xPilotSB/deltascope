@@ -877,71 +877,29 @@ export class PriceAggregator extends DurableObject<Env> {
     this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 2000);
   }
 
-  // Fast-path field extraction: avoids full JSON.parse for price_update messages
-  // Hermes messages are ~600-800 bytes; targeted extraction saves ~1-3ms per message
-  private static extractJsonField(data: string, field: string): string | null {
-    const key = `"${field}":`;
-    const idx = data.indexOf(key);
-    if (idx === -1) return null;
-    let start = idx + key.length;
-    // Skip whitespace
-    while (start < data.length && data.charCodeAt(start) <= 32) start++;
-    if (start >= data.length) return null;
-    const ch = data.charCodeAt(start);
-    if (ch === 34) { // " — quoted string
-      let end = start + 1;
-      while (end < data.length) {
-        if (data.charCodeAt(end) === 34 && data.charCodeAt(end - 1) !== 92) break; // unescaped "
-        end++;
-      }
-      return end >= data.length ? null : data.slice(start + 1, end);
-    }
-    // Number or other literal — read until delimiter
-    let end = start;
-    while (end < data.length) {
-      const c = data.charCodeAt(end);
-      if (c === 44 || c === 125 || c === 93 || c <= 32) break; // , } ] or whitespace
-      end++;
-    }
-    return data.slice(start, end);
-  }
-
   private handleHermesMessage(raw: string | ArrayBuffer) {
     try {
       const data = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-
-      // Fast path: check message type without full JSON.parse
-      if (!data.includes('"price_update"')) return;
-
-      // Extract feed ID to find symbol
-      const id = PriceAggregator.extractJsonField(data, "id");
-      if (!id) return;
-      const symbol = HERMES_ID_TO_SYMBOL[id];
-      if (!symbol) return;
-      const st = this.state.get(symbol);
-      if (!st) return;
-
-      // Extract publish_time for dedup
-      const publishTimeStr = PriceAggregator.extractJsonField(data, "publish_time");
-      if (!publishTimeStr) return;
-      const publishTime = Number(publishTimeStr);
-      if (publishTime <= st.pythPublishTime) return; // Stale — skip
-
-      // Extract price fields
-      const priceStr = PriceAggregator.extractJsonField(data, "price");
-      const confStr = PriceAggregator.extractJsonField(data, "conf");
-      const expoStr = PriceAggregator.extractJsonField(data, "expo");
-      if (!priceStr || !expoStr) return;
-
-      const expo = Number(expoStr);
-      const mult = this.pow10(expo);
-      st.pythPrice = Number(priceStr) * mult;
-      if (confStr) st.pythConfidence = Number(confStr) * mult;
-      st.pythExpo = expo;
-      st.pythPublishTime = publishTime;
-      this.dirtyAssets.add(symbol);
-      this.updatePublishDelay();
-      this.scheduleBroadcast();
+      const msg = JSON.parse(data);
+      if (msg.type === "price_update" && msg.price_feed) {
+        const feed = msg.price_feed;
+        const symbol = HERMES_ID_TO_SYMBOL[feed.id];
+        if (!symbol) return;
+        const pd = feed.price;
+        const publishTime = Number(pd.publish_time);
+        const st = this.state.get(symbol);
+        if (st && publishTime > st.pythPublishTime) {
+          const expo = Number(pd.expo);
+          const mult = this.pow10(expo);
+          st.pythPrice = Number(pd.price) * mult;
+          st.pythConfidence = Number(pd.conf) * mult;
+          st.pythExpo = expo;
+          st.pythPublishTime = publishTime;
+          this.dirtyAssets.add(symbol);
+          this.updatePublishDelay();
+          this.scheduleBroadcast();
+        }
+      }
     } catch (e) { console.error("Hermes msg error:", e); }
   }
 
