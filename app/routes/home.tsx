@@ -250,6 +250,19 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   // ── Zustand store ──
   const { data, isConnected, latencyMs, rawTicks, tickVersion, connect, disconnect, setInitialData } = usePriceStore();
 
+  // Throttle dashboard data to ~4fps to reduce DOM reconciliation.
+  // The raw `data` arrives ~60/sec but the table only needs ~4 updates/sec.
+  const [throttledData, setThrottledData] = useState(data);
+  const throttleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    if (!throttleRef.current) {
+      setThrottledData(data);
+      throttleRef.current = setTimeout(() => { throttleRef.current = null; }, 250);
+    }
+  }, [data]);
+  useEffect(() => () => { if (throttleRef.current) clearTimeout(throttleRef.current); }, []);
+
   // Hydrate store with SSR data and connect WebSocket
   useEffect(() => {
     if (initialData) setInitialData(initialData);
@@ -278,10 +291,14 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   const [chartTimeframe, setChartTimeframe] = useState(1);
   const [chartType, setChartType] = useState<ChartType>("line");
 
-  // Raw ticks for selected chart asset
+  // Throttle chart updates to ~2fps (every 30 ticks) to avoid
+  // creating shallow copies 60 times/sec while still reacting to
+  // in-place-mutated rawTicks arrays.
+  const chartTickEpoch = useMemo(() => Math.floor(tickVersion / 30), [tickVersion]);
   const chartTicks = useMemo(() => {
-    return rawTicks.get(chartAsset) ?? [];
-  }, [rawTicks, chartAsset, tickVersion]);
+    const arr = rawTicks.get(chartAsset);
+    return arr ? arr.slice() : [];
+  }, [rawTicks, chartAsset, chartTickEpoch]);
 
   const chartCurrentPrice = useMemo(() => {
     const asset = data?.assets.find((a) => a.symbol === chartAsset);
@@ -310,12 +327,12 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
 
   // ── Memoized Stats Bar Values ──
   const statsBarValues = useMemo(() => ({
-    volume: formatCompact(data?.totalVolume24h ?? 0),
-    openInterest: formatCompact(data?.totalOpenInterest ?? 0),
-    avgFunding: formatPercent((data?.avgFundingRate ?? 0) * 24 * 365 * 100, 3),
-    discrepancyCount: data?.discrepancyCount ?? 0,
-    assetCount: data?.assets.length ?? 0,
-  }), [data?.totalVolume24h, data?.totalOpenInterest, data?.avgFundingRate, data?.discrepancyCount, data?.assets?.length]);
+    volume: formatCompact(throttledData?.totalVolume24h ?? 0),
+    openInterest: formatCompact(throttledData?.totalOpenInterest ?? 0),
+    avgFunding: formatPercent((throttledData?.avgFundingRate ?? 0) * 24 * 365 * 100, 3),
+    discrepancyCount: throttledData?.discrepancyCount ?? 0,
+    assetCount: throttledData?.assets.length ?? 0,
+  }), [throttledData?.totalVolume24h, throttledData?.totalOpenInterest, throttledData?.avgFundingRate, throttledData?.discrepancyCount, throttledData?.assets?.length]);
 
   // ── Leverage Calculator Logic (memoized) ──
   const calcResults = useMemo(() => {
@@ -534,7 +551,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(data?.assets ?? []).map((asset) => (
+                  {(throttledData?.assets ?? []).map((asset) => (
                     <TableRow
                       key={asset.symbol}
                       className="border-white/5 hover:bg-white/[0.02] transition-colors"
@@ -692,7 +709,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent position="popper" sideOffset={4}>
-                      {(data?.assets ?? []).map((a) => (
+                      {(throttledData?.assets ?? []).map((a) => (
                         <SelectItem key={a.symbol} value={a.symbol}>
                           {a.symbol}
                         </SelectItem>
@@ -764,10 +781,10 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                 />
 
                 {/* Current funding info */}
-                {data && (
+                {throttledData && (
                   <div className="mt-4 grid grid-cols-3 gap-3">
                     {(() => {
-                      const asset = data.assets.find(
+                      const asset = throttledData.assets.find(
                         (a) => a.symbol === chartAsset
                       );
                       if (!asset) return null;
@@ -852,7 +869,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent position="popper" sideOffset={4}>
-                        {(data?.assets ?? []).map((a) => (
+                        {(throttledData?.assets ?? []).map((a) => (
                           <SelectItem key={a.symbol} value={a.symbol}>
                             {a.symbol}/USD
                           </SelectItem>

@@ -280,6 +280,7 @@ export class PriceAggregator extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const msg = typeof message === "string" ? message : new TextDecoder().decode(message);
+    if (msg === "ping") { ws.send("pong"); return; }
     if (msg === "refresh") ws.send(this.buildSnapshot());
   }
 

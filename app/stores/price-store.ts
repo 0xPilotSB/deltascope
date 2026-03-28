@@ -79,6 +79,7 @@ const MAX_TICKS = 36000; // ~10 min at ~60 ticks/s
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let pingTimer: ReturnType<typeof setInterval> | null = null;
 let alive = false;
 let reconnectAttempt = 0;
 
@@ -223,11 +224,19 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       ws = socket;
 
       socket.onopen = () => {
-        reconnectAttempt = 0; // Reset backoff on successful connection
+        reconnectAttempt = 0;
         set({ isConnected: true });
+        // Keepalive ping every 30s to prevent browser/proxy idle timeout
+        if (pingTimer) clearInterval(pingTimer);
+        pingTimer = setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send("ping");
+          }
+        }, 30000);
       };
 
       socket.onmessage = (event) => {
+        if (event.data === "pong") return; // keepalive response
         try {
           const newData = JSON.parse(event.data) as DashboardData;
           // Use serverTs for accurate edge→browser delivery latency
@@ -253,6 +262,7 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
       };
 
       socket.onclose = () => {
+        if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
         set({ isConnected: false });
         ws = null;
         if (alive) {
@@ -274,6 +284,11 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
 
   disconnect: () => {
     alive = false;
+
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
 
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
