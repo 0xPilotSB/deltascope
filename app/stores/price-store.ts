@@ -268,9 +268,13 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             const prev = get().data;
             if (!prev) return; // Need full snapshot first
 
+            // Build lookup map for O(1) delta merge (vs O(n) Array.find per asset)
+            const deltaMap = new Map<string, any>();
+            for (const d of msg.a) deltaMap.set(d.s, d);
+
             // Merge delta into existing assets
             const updatedAssets = prev.assets.map((asset) => {
-              const d = msg.a.find((u: any) => u.s === asset.symbol);
+              const d = deltaMap.get(asset.symbol);
               if (!d) return asset;
               return {
                 symbol: asset.symbol,
@@ -290,13 +294,30 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
               };
             });
 
-            // Recompute aggregates
-            let totalVolume = 0, totalOI = 0, fundingSum = 0, discrepancies = 0;
-            for (const a of updatedAssets) {
-              totalVolume += a.volume24h;
-              totalOI += a.openInterest;
-              fundingSum += a.fundingRate;
-              if (a.oracleDiscrepancy > 0.5) discrepancies++;
+            // Recompute aggregates only if meta fields (funding, OI, volume) changed
+            // Price-only deltas don't affect these, saving CPU at 60fps
+            let needsAggregateRecompute = false;
+            for (const d of msg.a) {
+              if (d.f !== undefined || d.oi !== undefined || d.v !== undefined) {
+                needsAggregateRecompute = true;
+                break;
+              }
+            }
+
+            let totalVolume: number, totalOI: number, fundingSum: number, discrepancies: number;
+            if (needsAggregateRecompute) {
+              totalVolume = 0; totalOI = 0; fundingSum = 0; discrepancies = 0;
+              for (const a of updatedAssets) {
+                totalVolume += a.volume24h;
+                totalOI += a.openInterest;
+                fundingSum += a.fundingRate;
+                if (a.oracleDiscrepancy > 0.5) discrepancies++;
+              }
+            } else {
+              totalVolume = prev.totalVolume24h;
+              totalOI = prev.totalOpenInterest;
+              fundingSum = prev.avgFundingRate * prev.assets.length;
+              discrepancies = prev.discrepancyCount;
             }
 
             const newData: DashboardData = {

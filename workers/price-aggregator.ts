@@ -153,6 +153,8 @@ export class PriceAggregator extends DurableObject<Env> {
   private assetSnapshotCache: Map<string, object> = new Map();
   // Reusable assets array to reduce allocations
   private reusableAssets: object[] = [];
+  // Cache last HL mid strings to skip parseFloat when unchanged
+  private lastHlMidStr: Map<string, string> = new Map();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -287,7 +289,7 @@ export class PriceAggregator extends DurableObject<Env> {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const msg = typeof message === "string" ? message : new TextDecoder().decode(message);
-    if (msg === "ping") { ws.send("pong"); return; }
+    // Note: "ping"→"pong" is handled automatically by setWebSocketAutoResponse
     if (msg === "refresh") ws.send(this.buildSnapshot());
   }
 
@@ -695,6 +697,9 @@ export class PriceAggregator extends DurableObject<Env> {
         for (const symbol of SYMBOLS) {
           const mid = mids[symbol];
           if (mid !== undefined) {
+            // Skip parseFloat if string unchanged from last message
+            if (mid === this.lastHlMidStr.get(symbol)) continue;
+            this.lastHlMidStr.set(symbol, mid);
             const price = parseFloat(mid);
             const st = this.state.get(symbol);
             if (st && st.markPrice !== price) {
@@ -997,11 +1002,23 @@ export class PriceAggregator extends DurableObject<Env> {
       this.lastBroadcastTime = performance.now();
       this.broadcast();
     } else {
-      this.broadcastTimer = setTimeout(() => {
-        this.broadcastPending = false;
-        this.lastBroadcastTime = performance.now();
-        this.broadcast();
-      }, PriceAggregator.BROADCAST_INTERVAL - elapsed);
+      // Use queueMicrotask for near-zero scheduling overhead
+      // (setTimeout has ~4ms minimum resolution on Workers)
+      const remaining = PriceAggregator.BROADCAST_INTERVAL - elapsed;
+      if (remaining <= 2) {
+        // Close enough — fire on next microtask (~0.01ms vs ~4ms setTimeout)
+        queueMicrotask(() => {
+          this.broadcastPending = false;
+          this.lastBroadcastTime = performance.now();
+          this.broadcast();
+        });
+      } else {
+        this.broadcastTimer = setTimeout(() => {
+          this.broadcastPending = false;
+          this.lastBroadcastTime = performance.now();
+          this.broadcast();
+        }, remaining);
+      }
     }
   }
 
@@ -1020,6 +1037,11 @@ export class PriceAggregator extends DurableObject<Env> {
   // Format: {"a":[{"s":"BTC","p":67000,"c":12,"m":67010,...}],"t":1234,"st":1234}
   // ~200-400 bytes per frame = ~85% smaller than full snapshot
 
+  // Pre-allocated delta objects per symbol to avoid GC churn
+  private deltaObjs: Map<string, any> = new Map(
+    SYMBOLS.map((s) => [s, { s, p: 0, c: 0, e: 0, m: 0, d: 0, ch: 0, f: 0, oi: 0, v: 0, pt: 0, bb: 0, ba: 0, pc: 0 }])
+  );
+
   private buildDelta(): string {
     const now = Date.now();
     const deltaAssets: any[] = [];
@@ -1029,22 +1051,22 @@ export class PriceAggregator extends DurableObject<Env> {
       if (!st || (st.pythPrice === 0 && st.markPrice === 0)) continue;
 
       const markPrice = st.markPrice || st.pythPrice;
-      deltaAssets.push({
-        s: symbol,
-        p: st.pythPrice,
-        c: st.pythConfidence,
-        e: st.pythExpo,
-        m: markPrice,
-        d: markPrice > 0 ? Math.abs((st.pythPrice - markPrice) / markPrice) * 100 : 0,
-        ch: st.prevDayPx > 0 ? ((markPrice - st.prevDayPx) / st.prevDayPx) * 100 : 0,
-        f: st.fundingRate,
-        oi: st.openInterest * markPrice,
-        v: st.volume24h,
-        pt: st.pythPublishTime,
-        bb: st.bestBidPrice,
-        ba: st.bestAskPrice,
-        pc: st.publisherCount,
-      });
+      // Reuse pre-allocated object — mutate in place
+      const obj = this.deltaObjs.get(symbol)!;
+      obj.p = st.pythPrice;
+      obj.c = st.pythConfidence;
+      obj.e = st.pythExpo;
+      obj.m = markPrice;
+      obj.d = markPrice > 0 ? Math.abs((st.pythPrice - markPrice) / markPrice) * 100 : 0;
+      obj.ch = st.prevDayPx > 0 ? ((markPrice - st.prevDayPx) / st.prevDayPx) * 100 : 0;
+      obj.f = st.fundingRate;
+      obj.oi = st.openInterest * markPrice;
+      obj.v = st.volume24h;
+      obj.pt = st.pythPublishTime;
+      obj.bb = st.bestBidPrice;
+      obj.ba = st.bestAskPrice;
+      obj.pc = st.publisherCount;
+      deltaAssets.push(obj);
     }
 
     this.dirtyAssets.clear();
