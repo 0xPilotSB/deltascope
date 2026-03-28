@@ -44,6 +44,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "strict-origin-when-cross-origin",
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
   "Content-Security-Policy": CSP,
 };
 
@@ -84,6 +85,28 @@ const DO_STANDBY = "global-standby";
 const DO_TIMEOUT_MS = 3000;
 let standbyWarmed = false;
 
+// ─── Simple per-IP rate limiter (in-memory, resets on cold start) ───
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT = 120; // requests per window
+const RATE_WINDOW_MS = 60_000; // 1 minute
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  let entry = rateLimitMap.get(ip);
+  if (!entry || now >= entry.resetAt) {
+    entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+    rateLimitMap.set(ip, entry);
+  }
+  entry.count++;
+  // Prune stale entries periodically
+  if (rateLimitMap.size > 10000) {
+    for (const [k, v] of rateLimitMap) {
+      if (now >= v.resetAt) rateLimitMap.delete(k);
+    }
+  }
+  return entry.count > RATE_LIMIT;
+}
+
 async function fetchWithFailover(
   env: Env,
   buildRequest: () => Request,
@@ -110,6 +133,17 @@ async function fetchWithFailover(
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // ─── Rate limit API endpoints ───
+    if (url.pathname.startsWith("/api/")) {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      if (isRateLimited(ip)) {
+        return new Response("Too Many Requests", {
+          status: 429,
+          headers: { "Retry-After": "60" },
+        });
+      }
+    }
 
     // ─── Warm up standby DO on first request (one-time) ───
     if (!standbyWarmed) {

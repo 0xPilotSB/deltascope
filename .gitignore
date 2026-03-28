@@ -1,5 +1,7 @@
 .DS_Store
 .env
+.env.*
+.dev.vars
 /node_modules/
 *.tsbuildinfo
 package-lock.json
@@ -12,3 +14,17 @@ package-lock.json
 .mf
 .wrangler
 worker-configuration.d.ts
+
+# Credentials
+.git-credentials
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+*.swp
+*.swo
