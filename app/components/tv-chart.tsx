@@ -51,6 +51,7 @@ function TVChartInner({
   const timeframeRef = useRef(timeframe);
   const chartTypeRef = useRef(chartType);
   const lastTickVersionRef = useRef(0);
+  const seededRef = useRef(false); // Has chart received initial setData with real data?
 
   // Keep refs in sync with props
   symbolRef.current = symbol;
@@ -186,6 +187,29 @@ function TVChartInner({
         const arr = state.rawTicks.get(curSymbol);
         if (!arr || arr.length === 0) return;
 
+        // First time we have real data — do full setData() to seed the chart
+        if (!seededRef.current || arr.length < 3) {
+          if (curType === "candlestick") {
+            const candles = aggregateCandles(arr, curTf);
+            if (candles.length > 0) {
+              seriesRef.current.setData(
+                candles.map((d) => ({ time: d.time as any, open: d.open, high: d.high, low: d.low, close: d.close })),
+              );
+              seededRef.current = true;
+            }
+          } else {
+            const line = aggregateLine(arr, curTf);
+            if (line.length > 0) {
+              seriesRef.current.setData(
+                line.map((d) => ({ time: d.time as any, value: d.value })),
+              );
+              seededRef.current = true;
+            }
+          }
+          if (seededRef.current) chart.timeScale().fitContent();
+          return;
+        }
+
         // Only compute the latest candle/point from recent ticks
         // instead of re-aggregating the entire array
         const lastTick = arr[arr.length - 1];
@@ -264,6 +288,7 @@ function TVChartInner({
     // Full data reset on symbol/timeframe/chartType change
     const rawTicks = usePriceStore.getState().rawTicks;
     const arr = rawTicks.get(sym) ?? [];
+    seededRef.current = arr.length > 0; // Reset seed tracking
 
     if (needsSeriesSwap) {
       setupSeries(chartRef.current, modulesRef.current, chartType);
