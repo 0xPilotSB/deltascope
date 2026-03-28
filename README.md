@@ -1,183 +1,359 @@
-# camelAI Starter Template
+<p align="center">
+  <img src="public/favicon.svg" width="64" height="64" alt="DeltaScope Logo" />
+</p>
 
-Full-stack React app with SSR, Durable Objects, and SQLite. Built on React Router 7 and Cloudflare Workers.
+<h1 align="center">DeltaScope</h1>
 
-## Architecture Default
+<p align="center">
+  <strong>Real-time Oracle & DEX Intelligence Platform</strong><br/>
+  Monitor Pyth Network oracle prices vs Hyperliquid mark prices — catch discrepancies, track funding rates, and analyze infrastructure latency in real-time.
+</p>
 
-Use React Router 7 in framework mode (successor to Remix): data reads in route `loader()`, mutations in `action()`, and forms/fetchers for server-driven updates. Prefer this over SPA-style client fetching patterns by default.
+<p align="center">
+  <a href="https://deltascope.site">Live Demo</a> · <a href="#architecture">Architecture</a> · <a href="#pyth-integration-deep-dive">Pyth Integration</a> · <a href="#getting-started">Getting Started</a>
+</p>
 
-## Quick Start
+---
+
+## Why DeltaScope?
+
+Oracle price feeds and DEX mark prices **should** be the same — but they're not. The gap between Pyth's oracle price and Hyperliquid's mark price reveals:
+
+- **Liquidation risk** — When oracles lag mark prices, leveraged positions can be liquidated before the oracle catches up
+- **Funding rate mechanics** — The oracle-mark spread directly drives funding rate calculations
+- **Infrastructure health** — A growing oracle delay signals network congestion or validator issues
+- **Arbitrage signals** — Persistent discrepancies across venues create cross-exchange opportunities
+
+Most trading dashboards show you prices. DeltaScope shows you **the infrastructure behind the prices**.
+
+---
+
+## Pyth Integration Deep-Dive
+
+DeltaScope uses Pyth Network as the **primary price truth layer** — every feature depends on Pyth data, and the integration goes beyond simply reading prices.
+
+### 1. Triple-Source Oracle Ingestion (Lowest Possible Latency)
+
+We don't just connect to one Pyth endpoint. We run **three parallel Pyth data sources** and accept whichever returns the freshest `publishTime`:
+
+```
+┌─────────────────────────┐
+│  Hermes WS (main)       │──┐
+│  hermes.pyth.network    │  │
+└─────────────────────────┘  │    ┌─────────────────────┐
+                              ├───▶│  Freshness Dedup     │──▶ Broadcast
+┌─────────────────────────┐  │    │  (highest publishTime│     to clients
+│  Hermes WS (beta)       │──┘    │   wins per asset)    │
+│  hermes-beta.pyth.network│      └─────────────────────┘
+└─────────────────────────┘            ▲
+                                        │
+┌─────────────────────────┐            │
+│  Hermes REST (1s poll)  │────────────┘
+│  /v2/updates/price/latest│
+└─────────────────────────┘
+```
+
+**Why this matters:** Hermes main and beta are separate relay infrastructure with different latency characteristics. REST polling catches updates that WebSocket batching delays. The combination yields ~10-15% lower oracle delay than a single WS connection.
+
+**Implementation:** [`workers/price-aggregator.ts`](workers/price-aggregator.ts) lines 324-329 (dual WS), 526-565 (REST poll), 567-591 (freshness dedup via `publishTime` comparison).
+
+### 2. Pyth Pro (Lazer) Ready — Sub-50ms When Enabled
+
+The aggregator has a **dual-mode architecture**: if a `PYTH_PRO_TOKEN` environment variable is set, it automatically switches from Hermes to Pyth's Lazer protocol:
+
+- Connects to all 3 Lazer endpoints (`pyth-lazer-{0,1,2}.dourolabs.app`) for redundancy
+- Subscribes to `real_time` channel (1-50ms updates vs ~400ms on Hermes)
+- Uses microsecond-precision `feedUpdateTimestamp` for latency measurement
+- Processes `bestBidPrice`, `bestAskPrice`, and `publisherCount` — data not available on Hermes
+
+```typescript
+// Automatic mode selection — no code changes needed
+const token = this.env.PYTH_PRO_TOKEN;
+this.usingPythPro = !!token;
+
+if (this.usingPythPro) {
+  // Connect to all 3 Lazer endpoints for redundancy
+  for (let i = 0; i < 3; i++) this.connectPythPro(i, token);
+} else {
+  // Dual Hermes + REST polling fallback
+  this.connectPythHermes("https://hermes.pyth.network/ws", false);
+  this.connectPythHermes("https://hermes-beta.pyth.network/ws", true);
+  this.startPythRestPoll();
+}
+```
+
+### 3. Oracle Discrepancy Monitoring
+
+For each of the 8 tracked assets, DeltaScope computes the **real-time discrepancy** between Pyth's oracle price and Hyperliquid's mark price:
+
+```
+discrepancy = |pythPrice - markPrice| / markPrice × 100%
+```
+
+This is displayed per-asset in the Market Overview table with color-coded severity badges. Assets exceeding 0.5% discrepancy are flagged, and a global `discrepancyCount` is shown in the dashboard header.
+
+### 4. Publish Delay Analytics
+
+The Latency Monitor page computes the **median Pyth publish delay** across all tracked feeds:
+
+```
+publishDelay = now() - (publishTime from Pyth)
+```
+
+This is tracked in a ring buffer (120 samples, ~10 min) and visualized on a TradingView chart alongside Hyperliquid API latency and WebSocket interval metrics. Traders can see exactly how stale their oracle data is at any moment.
+
+### 5. AI Chat with 6 Pyth-Powered Tools
+
+The AI assistant (`workers/chat.ts` + `workers/pyth-tools.ts`) has direct access to the full Pyth Hermes API through 6 structured tools:
+
+| Tool | What It Does | Pyth API Used |
+|------|-------------|---------------|
+| `searchPriceFeeds` | Search 1,930+ feeds by symbol, name, or asset type | `/v2/price_feeds` |
+| `getLatestPrices` | Real-time prices with confidence intervals | `/v2/updates/price/latest` |
+| `getHistoricalPrice` | Price at any historical timestamp | `/v2/updates/price/{timestamp}` |
+| `getTwap` | Time-weighted average price (1-600s windows) | `/v2/updates/twap/latest` |
+| `getHyperliquidData` | Cross-reference with Hyperliquid perps data | Hyperliquid REST API |
+| `analyzePriceFeed` | Full analysis: price + TWAP + deviation + confidence | Multiple endpoints combined |
+
+Example interaction:
+> **User:** "Compare BTC and ETH funding rates"
+> **AI:** Fetches real-time Pyth prices for both, queries Hyperliquid funding/OI, computes discrepancies, and presents a structured comparison.
+
+### 6. Confidence Interval Visualization
+
+Pyth provides a `confidence` value with every price update — a measure of publisher agreement. DeltaScope displays this alongside the price, giving traders visibility into **price certainty**, not just price level. Wide confidence = disagreement among publishers = higher risk.
+
+---
+
+## Features
+
+### Dashboard (`/`)
+- Real-time price table: 8 major assets with Pyth oracle prices vs Hyperliquid mark prices
+- Oracle discrepancy badges (color-coded by severity)
+- 24h volume, open interest, annualized funding rates
+- HIP-3 ecosystem overview (permissionless perp DEXs on Hyperliquid)
+
+### Ticker Analysis (`/analysis`)
+- Deep-dive into individual assets
+- TradingView candlestick charts (built from raw tick data)
+- Orderbook visualization
+- Funding rate history
+
+### Latency Monitor (`/latency`)
+- Pyth Oracle Delay (median publish delay across feeds)
+- Hyperliquid REST API round-trip time
+- WebSocket delivery latency (edge → browser)
+- Overall infrastructure health score (0-100)
+- Multi-line TradingView chart with 10-min rolling history
+- Source health table with P50/P95/MIN/MAX percentiles
+
+### AI Chat Assistant
+- Natural language queries about any Pyth price feed
+- Cross-references Pyth oracle data with Hyperliquid perps
+- 6 structured tools for real-time and historical analysis
+- Accessible via floating chat button on all pages
+
+### Developers (`/developers`)
+- API documentation and integration examples
+
+---
+
+## Architecture
+
+```
+                    ┌──────────────────────────────────────────────┐
+                    │              Cloudflare Edge                  │
+                    │                                              │
+ Browsers ────WS────┤  ┌────────────────────────────────────────┐  │
+                    │  │       PriceAggregator (Durable Object)  │  │
+                    │  │                                          │  │
+                    │  │  Pyth Hermes WS ──┐                     │  │
+                    │  │  Pyth Hermes Beta ─┼─▶ Merge + Dedup    │  │
+                    │  │  Pyth REST Poll ──┘    by publishTime   │  │
+                    │  │                            │             │  │
+                    │  │  HL allMids WS ────────────┤             │  │
+                    │  │  HL Meta REST (3s) ────────┤             │  │
+                    │  │                            ▼             │  │
+                    │  │                    Fan-out to clients    │  │
+                    │  │                    (16ms throttle)       │  │
+                    │  └────────────────────────────────────────┘  │
+                    │                                              │
+                    │  ┌──────────┐  ┌──────────────────────────┐  │
+                    │  │ Chat DO  │  │   React Router 7 (SSR)   │  │
+                    │  │ (AI SDK) │  │   + Security Headers     │  │
+                    │  └──────────┘  └──────────────────────────┘  │
+                    └──────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Single Durable Object for all price state** — The `PriceAggregator` DO maintains exactly one instance (`idFromName("global")`) that holds all upstream connections. This means zero coordination overhead and guaranteed consistency — every client sees the same merged state.
+
+2. **16ms broadcast throttle** — Upstream updates arrive at different rates (Pyth ~400ms, HL ~1000ms). Instead of broadcasting on every tick, we coalesce updates within a 16ms window using `queueMicrotask()` for immediate dispatch or `setTimeout()` for the remaining window.
+
+3. **Incremental snapshot caching** — Only assets with changed data (`dirtyAssets` set) get their JSON object recomputed. Unchanged assets reuse their cached snapshot object, reducing `JSON.stringify` work on every broadcast.
+
+4. **24/7 keep-alive via DO Alarms** — The DO sets an alarm every 25 seconds. When the alarm fires, it calls `ensureUpstream()` to keep all WebSocket connections alive, even with zero connected clients. This eliminates cold-start delays for the first visitor.
+
+5. **Smart Placement** — Cloudflare's Smart Placement routes the Worker closer to Pyth/Hyperliquid backends rather than the user's edge, reducing upstream fetch latency.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Runtime** | Cloudflare Workers + Durable Objects |
+| **Framework** | React Router 7 (SSR) |
+| **Oracle Data** | Pyth Network (Hermes WS + REST, Lazer-ready) |
+| **DEX Data** | Hyperliquid (WebSocket + REST API) |
+| **State Management** | Zustand |
+| **Charts** | TradingView Lightweight Charts |
+| **AI** | Vercel AI SDK + Workers AI |
+| **Styling** | Tailwind CSS 4 + shadcn/ui |
+| **Font** | Space Grotesk (self-hosted via @fontsource) |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- [Bun](https://bun.sh/) (v1.0+)
+- [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (Cloudflare CLI)
+- A Cloudflare account
+
+### Install & Run Locally
 
 ```bash
-bun dev          # Start dev server
-bun run test     # Run tests
-bun run build    # Build for production
-bun run deploy   # Deploy to Cloudflare
+git clone https://github.com/0xPilotSB/deltascope.git
+cd deltascope
+bun install
+bun dev
 ```
+
+Open `http://localhost:5173` — the dashboard will connect to live Pyth and Hyperliquid APIs.
+
+### Deploy to Cloudflare
+
+```bash
+bun run deploy
+```
+
+This builds the React Router app and deploys the Worker + Durable Objects to Cloudflare's edge network.
+
+### Enable Pyth Pro (Lazer) — Optional
+
+For sub-50ms oracle updates (requires Pyth Pro access):
+
+```bash
+wrangler secret put PYTH_PRO_TOKEN
+# Paste your Pyth Lazer API token
+```
+
+The aggregator automatically detects the token and switches from Hermes to Lazer.
+
+---
 
 ## Project Structure
 
 ```
-app/
-  routes/           # React Router routes (loaders, actions, components)
-  schemas/          # Zod schemas (shared between routes and DOs)
-workers/
-  app.ts            # Worker entry point (exports DOs)
-  example-do.ts     # Example Durable Object with SQLite
-  tests/            # Vitest tests for Durable Objects
-wrangler.jsonc      # Cloudflare config (bindings, migrations)
-vitest.config.ts    # Vitest config for Workers pool
+deltascope/
+├── app/
+│   ├── components/
+│   │   ├── latency-chart.tsx    # Multi-line TradingView latency chart
+│   │   ├── oracle-chat.tsx      # AI chat popup (lazy-mounted)
+│   │   ├── tv-chart.tsx         # TradingView candlestick chart
+│   │   ├── markdown-renderer.tsx
+│   │   ├── mobile-nav.tsx
+│   │   └── ui/                  # shadcn/ui components
+│   ├── routes/
+│   │   ├── home.tsx             # Dashboard — price table, stats, HIP-3
+│   │   ├── analysis.tsx         # Ticker deep-dive with charts
+│   │   ├── latency.tsx          # Infrastructure latency monitor
+│   │   ├── developers.tsx       # API docs page
+│   │   └── chat.tsx             # Full-page chat view
+│   ├── stores/
+│   │   └── price-store.ts       # Zustand store — WS connection, tick aggregation
+│   ├── root.tsx                 # App shell, meta tags, preconnect hints
+│   └── app.css                  # Tailwind + theme config
+├── workers/
+│   ├── app.ts                   # Worker entry — routing, security headers, caching
+│   ├── price-aggregator.ts      # Core DO — Pyth + HL ingestion, fan-out, latency tracking
+│   ├── chat.ts                  # AI chat agent (Workers AI + 6 Pyth tools)
+│   ├── chat-sessions.ts         # Chat session index DO
+│   ├── pyth-tools.ts            # 6 AI tools: search, prices, historical, TWAP, analysis
+│   └── data-proxy.ts            # Local dev data proxy shim
+├── wrangler.jsonc               # Cloudflare config — bindings, Smart Placement, compat
+├── package.json
+└── LICENSE                      # Apache 2.0
 ```
 
-## Key Patterns
+---
 
-### Accessing Cloudflare Bindings in Loaders/Actions
+## API Endpoints
 
-```typescript
-export async function loader({ context }: Route.LoaderArgs) {
-  // Access any binding via context.cloudflare.env
-  const id = context.cloudflare.env.EXAMPLE_DO.idFromName("global");
-  const stub = context.cloudflare.env.EXAMPLE_DO.get(id);
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/prices` | GET | Current merged state (Pyth + Hyperliquid) for all 8 assets |
+| `/api/latency` | GET | Latency history buffer + current source status |
+| `/api/hip3` | GET | HIP-3 ecosystem data (all permissionless DEXs) |
+| `/ws/prices` | WS | Real-time price stream (auto-reconnect, exponential backoff) |
 
-  // Call RPC methods directly (not fetch!)
-  const data = await stub.listContacts();
-  return { data };
-}
-```
-
-### SQL Data Proxy Service Binding
-
-The starter includes a `DATA_PROXY` service binding.
-
-- Local dev: binding points to `LocalDataProxyService` (`workers/data-proxy.ts`), which forwards to `DATA_PROXY_URL` when set
-- camelAI deploy: platform rewrites `DATA_PROXY` to its internal service binding
-
-```typescript
-export async function loader({ context }: Route.LoaderArgs) {
-  const result = await context.cloudflare.env.DATA_PROXY.mysqlQuery({
-    mode: "read",
-    host: "db.example.com",
-    user: "user",
-    password: "pass",
-    database: "analytics",
-    query: "SELECT * FROM orders WHERE customer_id = ?",
-    params: [123],
-  });
-
-  if (!result.ok) {
-    throw new Error(result.error.message);
-  }
-
-  return { rows: result.data.recordset ?? [] };
-}
-```
-
-### Durable Object with SQLite
-
-```typescript
-export class MyDO extends DurableObject<Env> {
-  private sql: SqlStorage;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.sql = ctx.storage.sql;
-
-    // Create tables (idempotent)
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS items (...)`);
-  }
-
-  // RPC method - callable from routes
-  async listItems() {
-    return this.sql.exec("SELECT * FROM items").toArray();
-  }
-}
-```
-
-### Shared Zod Schemas
-
-Put schemas in `app/schemas/` and import in both routes and DOs:
-
-```typescript
-// app/schemas/contact.ts
-export const CreateContactSchema = z.object({
-  name: z.string().min(1),
-  email: z.string().email(),
-});
-
-// In route action:
-const result = CreateContactSchema.safeParse(formData);
-
-// In DO: use the same types
-async createContact(input: CreateContactInput) { ... }
-```
-
-### HydrateFallback for Loading States
-
-```typescript
-// Shows during initial hydration (SSR → client)
-export function HydrateFallback() {
-  return <div>Loading...</div>;
-}
-```
-
-## Testing
+### Example: Fetch Current Prices
 
 ```bash
-bun run test  # Run tests with vitest
+curl https://deltascope.site/api/prices | jq '.assets[] | {symbol, pythPrice, markPrice, oracleDiscrepancy}'
 ```
 
-### Testing Durable Objects
-
-Tests use `@cloudflare/vitest-pool-workers` for isolated DO testing:
-
-```typescript
-import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-
-describe("MyDO", () => {
-  it("creates and retrieves items", async () => {
-    // Get a DO stub from env bindings
-    const id = env.MY_DO.idFromName("test");
-    const stub = env.MY_DO.get(id);
-
-    // Call RPC methods directly
-    await stub.createItem({ name: "Test" });
-    const items = await stub.listItems();
-
-    expect(items).toHaveLength(1);
-  });
-});
+```json
+{
+  "symbol": "BTC",
+  "pythPrice": 66459.91,
+  "markPrice": 66484.50,
+  "oracleDiscrepancy": 0.037
+}
 ```
 
-See `workers/tests/example-do.test.ts` for a complete example.
+---
 
-**Known limitation:** Tests expecting DO methods to throw exceptions may cause "Failed to pop isolated storage stack frame" errors. Test error handling in route actions instead.
+## Performance Optimizations
 
-## Adding a New Durable Object
+- **Triple Pyth source** — Dual Hermes WS + REST polling for lowest oracle delay
+- **16ms broadcast coalescing** — Microtask-based throttle prevents WS storm
+- **Incremental JSON snapshots** — Only dirty assets recomputed per broadcast
+- **Smart Placement** — Worker runs near Pyth/HL backends, not user edge
+- **Self-hosted fonts** — Zero external CSS or font requests
+- **Immutable asset caching** — Hashed filenames get `max-age=31536000`
+- **Preconnect hints** — Full TCP+TLS established during HTML parse
+- **HTML edge caching** — `max-age=5, stale-while-revalidate=30`
+- **Security-hardened CSP** — No `unsafe-eval`, strict connect-src whitelist
 
-1. Create the class in `workers/my-do.ts`
-2. Export from `workers/app.ts`: `export { MyDO } from "./my-do"`
-3. Add binding to `wrangler.jsonc`:
-   ```jsonc
-   "durable_objects": {
-     "bindings": [{ "name": "MY_DO", "class_name": "MyDO" }]
-   }
-   ```
-4. Add migration (increment tag):
-   ```jsonc
-   "migrations": [
-     { "tag": "v1", "new_sqlite_classes": ["ExampleDO"] },
-     { "tag": "v2", "new_sqlite_classes": ["MyDO"] }
-   ]
-   ```
-5. `postinstall` runs `wrangler types` automatically; re-run `bun run cf-typegen` after binding changes to update `Env` types
+---
 
-## Adding shadcn/ui Components
+## Security
 
-Use `bunx` to run the shadcn CLI:
+- Content Security Policy with strict directives (no `unsafe-eval`)
+- `X-Frame-Options: DENY` — prevents clickjacking
+- `X-Content-Type-Options: nosniff` — prevents MIME sniffing
+- Origin validation on WebSocket upgrades
+- HttpOnly session cookies for chat
+- No secrets in client bundle
 
-```bash
-bunx --bun shadcn@latest add button card input
-```
+---
 
-Components install to `app/components/ui/`.
+## License
+
+[Apache License 2.0](LICENSE)
+
+---
+
+## Acknowledgments
+
+- [Pyth Network](https://pyth.network/) — Real-time oracle price data
+- [Hyperliquid](https://hyperliquid.xyz/) — Perpetual DEX market data
+- [TradingView Lightweight Charts](https://github.com/nicehash/lightweight-charts) — Charting library
+- [Cloudflare Workers](https://workers.cloudflare.com/) — Edge runtime
+- [React Router](https://reactrouter.com/) — Full-stack framework
+
+Built by [@0xPilotSB](https://github.com/0xPilotSB)
