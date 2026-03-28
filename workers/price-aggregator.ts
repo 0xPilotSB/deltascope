@@ -974,19 +974,16 @@ export class PriceAggregator extends DurableObject<Env> {
 
   private updatePublishDelay() {
     const nowSec = Date.now() / 1000;
-    const delays: number[] = [];
+    let sum = 0, count = 0;
     for (const symbol of SYMBOLS) {
       const st = this.state.get(symbol)!;
       if (st.pythPublishTime > 0) {
         const pubSec = this.usingPythPro ? st.pythPublishTime / 1e6 : st.pythPublishTime;
         const delay = (nowSec - pubSec) * 1000;
-        if (delay > 0 && delay < 60000) delays.push(delay);
+        if (delay > 0 && delay < 60000) { sum += delay; count++; }
       }
     }
-    if (delays.length > 0) {
-      delays.sort((a, b) => a - b);
-      this.pythPublishDelayMs = delays[Math.floor(delays.length / 2)];
-    }
+    if (count > 0) this.pythPublishDelayMs = sum / count;
   }
 
   // ─── Broadcast throttle (16ms = 60fps — full speed to clients) ─
@@ -1042,16 +1039,21 @@ export class PriceAggregator extends DurableObject<Env> {
     SYMBOLS.map((s) => [s, { s, p: 0, c: 0, e: 0, m: 0, d: 0, ch: 0, f: 0, oi: 0, v: 0, pt: 0, bb: 0, ba: 0, pc: 0 }])
   );
 
+  // Pre-allocated payload object — mutated in place, serialized each frame
+  private deltaPayload: any = { a: [] as any[], t: 0, st: 0 };
+
   private buildDelta(): string {
     const now = Date.now();
-    const deltaAssets: any[] = [];
+    const payload = this.deltaPayload;
+    payload.a.length = 0; // Clear without reallocating
+    payload.t = now;
+    payload.st = now;
 
     for (const symbol of this.dirtyAssets) {
       const st = this.state.get(symbol);
       if (!st || (st.pythPrice === 0 && st.markPrice === 0)) continue;
 
       const markPrice = st.markPrice || st.pythPrice;
-      // Reuse pre-allocated object — mutate in place
       const obj = this.deltaObjs.get(symbol)!;
       obj.p = st.pythPrice;
       obj.c = st.pythConfidence;
@@ -1066,16 +1068,10 @@ export class PriceAggregator extends DurableObject<Env> {
       obj.bb = st.bestBidPrice;
       obj.ba = st.bestAskPrice;
       obj.pc = st.publisherCount;
-      deltaAssets.push(obj);
+      payload.a.push(obj);
     }
 
     this.dirtyAssets.clear();
-
-    const payload: any = {
-      a: deltaAssets,
-      t: now,
-      st: now,
-    };
 
     // Include sources every ~5s so client stays informed
     if (this.broadcastCount % 300 === 0) {
@@ -1091,6 +1087,8 @@ export class PriceAggregator extends DurableObject<Env> {
         hlWsIntervalMs: this.hlWsIntervalMs || null,
         pythPublishDelayMs: this.pythPublishDelayMs || null,
       };
+    } else {
+      delete payload.src;
     }
 
     return JSON.stringify(payload);

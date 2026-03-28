@@ -76,7 +76,8 @@ interface PriceStore {
 // Server sends at ~60fps, 60 * 60 * 10 = 36000 ticks per asset for 10 min
 const MAX_TICKS = 36000;
 
-// ─── Internal refs (module-scoped, SSR-safe) ───────────────
+// ─── Reusable structures (module-scoped, avoid per-frame allocation) ──
+const _deltaMap = new Map<string, any>();
 
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -268,31 +269,31 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             const prev = get().data;
             if (!prev) return; // Need full snapshot first
 
-            // Build lookup map for O(1) delta merge (vs O(n) Array.find per asset)
-            const deltaMap = new Map<string, any>();
-            for (const d of msg.a) deltaMap.set(d.s, d);
+            // Build lookup map — reuse module-scoped Map to avoid allocation
+            _deltaMap.clear();
+            for (const d of msg.a) _deltaMap.set(d.s, d);
 
-            // Merge delta into existing assets
-            const updatedAssets = prev.assets.map((asset) => {
-              const d = deltaMap.get(asset.symbol);
-              if (!d) return asset;
-              return {
-                symbol: asset.symbol,
-                pythPrice: d.p ?? asset.pythPrice,
-                pythConfidence: d.c ?? asset.pythConfidence,
-                pythExpo: d.e ?? asset.pythExpo,
-                markPrice: d.m ?? asset.markPrice,
-                oracleDiscrepancy: d.d ?? asset.oracleDiscrepancy,
-                change24h: d.ch ?? asset.change24h,
-                fundingRate: d.f ?? asset.fundingRate,
-                openInterest: d.oi ?? asset.openInterest,
-                volume24h: d.v ?? asset.volume24h,
-                publishTime: d.pt ?? asset.publishTime,
-                bestBidPrice: d.bb ?? asset.bestBidPrice,
-                bestAskPrice: d.ba ?? asset.bestAskPrice,
-                publisherCount: d.pc ?? asset.publisherCount,
-              };
-            });
+            // Mutate existing asset objects in place for dirty assets
+            // (avoids creating 8 new objects + new array every frame)
+            const assets = prev.assets;
+            for (let i = 0; i < assets.length; i++) {
+              const asset = assets[i];
+              const d = _deltaMap.get(asset.symbol);
+              if (!d) continue;
+              asset.pythPrice = d.p ?? asset.pythPrice;
+              asset.pythConfidence = d.c ?? asset.pythConfidence;
+              asset.pythExpo = d.e ?? asset.pythExpo;
+              asset.markPrice = d.m ?? asset.markPrice;
+              asset.oracleDiscrepancy = d.d ?? asset.oracleDiscrepancy;
+              asset.change24h = d.ch ?? asset.change24h;
+              asset.fundingRate = d.f ?? asset.fundingRate;
+              asset.openInterest = d.oi ?? asset.openInterest;
+              asset.volume24h = d.v ?? asset.volume24h;
+              asset.publishTime = d.pt ?? asset.publishTime;
+              asset.bestBidPrice = d.bb ?? asset.bestBidPrice;
+              asset.bestAskPrice = d.ba ?? asset.bestAskPrice;
+              asset.publisherCount = d.pc ?? asset.publisherCount;
+            }
 
             // Recompute aggregates only if meta fields (funding, OI, volume) changed
             // Price-only deltas don't affect these, saving CPU at 60fps
@@ -307,7 +308,7 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             let totalVolume: number, totalOI: number, fundingSum: number, discrepancies: number;
             if (needsAggregateRecompute) {
               totalVolume = 0; totalOI = 0; fundingSum = 0; discrepancies = 0;
-              for (const a of updatedAssets) {
+              for (const a of assets) {
                 totalVolume += a.volume24h;
                 totalOI += a.openInterest;
                 fundingSum += a.fundingRate;
@@ -320,27 +321,25 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
               discrepancies = prev.discrepancyCount;
             }
 
-            const newData: DashboardData = {
-              assets: updatedAssets,
-              totalVolume24h: totalVolume,
-              totalOpenInterest: totalOI,
-              avgFundingRate: updatedAssets.length > 0 ? fundingSum / updatedAssets.length : 0,
-              discrepancyCount: discrepancies,
-              timestamp: msg.t,
-              serverTs: msg.st,
-              sources: msg.src ?? prev.sources, // Merge sources from delta when present
-            };
+            // Reuse prev.data object with mutated assets — avoid new DashboardData allocation
+            prev.assets = assets;
+            prev.totalVolume24h = totalVolume;
+            prev.totalOpenInterest = totalOI;
+            prev.avgFundingRate = assets.length > 0 ? fundingSum / assets.length : 0;
+            prev.discrepancyCount = discrepancies;
+            prev.timestamp = msg.t;
+            prev.serverTs = msg.st;
+            if (msg.src) prev.sources = msg.src;
 
             if (tabVisible) {
-              const ticks = appendTicks(get().rawTicks, updatedAssets, msg.t);
+              appendTicks(get().rawTicks, assets, msg.t);
               set({
-                data: newData,
+                data: prev,
                 latencyMs: Math.max(0, lat),
-                rawTicks: ticks,
                 tickVersion: get().tickVersion + 1,
               });
             } else {
-              set({ data: newData, latencyMs: Math.max(0, lat) });
+              set({ data: prev, latencyMs: Math.max(0, lat) });
             }
           }
         } catch {
