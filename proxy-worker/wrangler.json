@@ -1,0 +1,13 @@
+{
+  "name": "deltascope-proxy",
+  "main": "worker.js",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "placement": { "mode": "smart" },
+
+  "routes": [
+    { "pattern": "deltascope.site/*", "zone_name": "deltascope.site" },
+    { "pattern": "www.deltascope.site/*", "zone_name": "deltascope.site" }
+  ]
+}

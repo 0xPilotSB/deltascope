@@ -1,0 +1,98 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "deltascope",
+	"compatibility_date": "2026-02-28",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "./workers/app.ts",
+	"observability": {
+		"enabled": true
+	},
+
+	/**
+	 * Durable Objects
+	 * https://developers.cloudflare.com/durable-objects/
+	 *
+	 * To add a new DO:
+	 * 1. Create the class in workers/ (see workers/example-do.ts)
+	 * 2. Export it from workers/app.ts
+	 * 3. Add binding below
+	 * 4. Add migration (increment tag, add new_sqlite_classes for SQLite DOs)
+	 * 5. Run `bun wrangler types` to update Env types
+	 */
+	"durable_objects": {
+		"bindings": [
+			{ "name": "PRICE_AGGREGATOR", "class_name": "PriceAggregator" },
+			{ "name": "Chat", "class_name": "Chat" },
+			{ "name": "CHAT_SESSIONS", "class_name": "ChatSessionsDO" }
+		]
+	},
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["PriceAggregator"] },
+		{ "tag": "v2", "new_sqlite_classes": ["Chat", "ChatSessionsDO"] }
+	],
+
+	/**
+	 * R2 Object Storage
+	 * https://developers.cloudflare.com/r2/
+	 *
+	 * Use any bucket name — buckets are created automatically on first use.
+	 * Access via env.MY_BUCKET.get(), .put(), .list(), .delete()
+	 */
+	// "r2_buckets": [
+	// 	{ "binding": "MY_BUCKET", "bucket_name": "starter-uploads" }
+	// ],
+
+	/**
+	 * Workers AI
+	 * https://developers.cloudflare.com/workers-ai/
+	 *
+	 * Optional: declare a native AI binding for `workers-ai-provider`
+	 * (`createWorkersAI({ binding: env.AI })`).
+	 * In camelAI deploys, this is virtualized and rewritten to the platform AI entrypoint.
+	 */
+	"ai": { "binding": "AI" },
+
+	/**
+	 * Runtime variables available in loader/action context via context.cloudflare.env
+	 */
+	"vars": {
+		"AI_VIRTUAL_MODEL": "auto",
+		"VALUE_FROM_CLOUDFLARE": "Starter template running on Cloudflare"
+		// PYTH_PRO_TOKEN: Set via `wrangler secret put PYTH_PRO_TOKEN` or integration
+		// When set, enables Pyth Pro (Lazer) real_time channel (~1-50ms latency)
+		// Without it, falls back to free Pyth Hermes WebSocket (~400ms updates)
+	},
+
+	/**
+	 * Smart Placement
+	 * Cloudflare automatically places the Worker closer to backend APIs
+	 * (Pyth Hermes, Hyperliquid) instead of the user's edge — reduces
+	 * upstream fetch latency for REST polls and initial data bootstrap.
+	 * https://developers.cloudflare.com/workers/configuration/smart-placement/
+	 */
+	"placement": { "mode": "smart" },
+
+	/**
+	 * Static Assets
+	 * https://developers.cloudflare.com/workers/static-assets/binding/
+	 */
+	"assets": { "directory": "./public/", "binding": "ASSETS" },
+
+	/**
+	 * Worker Loaders (required for @cloudflare/codemode)
+	 * Enables DynamicWorkerExecutor to run LLM-generated code in ephemeral isolates.
+	 */
+	"worker_loaders": [{ "binding": "LOADER" }],
+
+	/**
+	 * Service bindings
+	 * - DATA_PROXY: locally binds to LocalDataProxyService; virtualized on camelAI deploy
+	 */
+	"services": [
+		{ "binding": "DATA_PROXY", "service": "deltascope", "entrypoint": "LocalDataProxyService" }
+	]
+}
