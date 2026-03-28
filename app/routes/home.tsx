@@ -55,6 +55,7 @@ const ASSET_COLORS: Record<string, string> = {
 
 const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
+  { label: "Predict & Win", href: "/predict" },
   { label: "Latency Monitor", href: "/latency" },
   { label: "Developers", href: "/developers" },
   { label: "Community", href: "https://discord.gg/pyth", external: true },
