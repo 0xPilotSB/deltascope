@@ -452,7 +452,14 @@ export class PriceAggregator extends DurableObject<Env> {
     }
 
     if (url.pathname === "/hip3") {
-      if (!this.hip3Data) await this.pollHip3();
+      // Non-blocking: return cached/SQLite data immediately, trigger background poll if stale
+      if (!this.hip3Data) {
+        // Don't block — schedule background poll and return empty
+        this.pollHip3();
+      } else if (Date.now() - (this.hip3Data.timestamp || 0) > 60000) {
+        // Stale > 60s — trigger background refresh
+        this.pollHip3();
+      }
       return new Response(JSON.stringify(this.hip3Data || { dexes: [], timestamp: Date.now() }), {
         headers: {
           "Content-Type": "application/json",
@@ -983,6 +990,8 @@ export class PriceAggregator extends DurableObject<Env> {
 
   // ─── HIP-3 data fetching ────────────────────────────────
 
+  private hip3PollFailures = 0;
+
   private startHip3Poll() {
     if (this.hip3PollTimer) return;
     this.pollHip3();
@@ -996,10 +1005,11 @@ export class PriceAggregator extends DurableObject<Env> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "perpDexs" }),
       });
-      if (!dexRes.ok) throw new Error("perpDexs fetch failed");
+      if (!dexRes.ok) throw new Error(`perpDexs fetch failed: ${dexRes.status}`);
       const dexList = await dexRes.json() as any[];
+      if (!Array.isArray(dexList)) throw new Error("perpDexs: not an array");
 
-      // For each HIP-3 DEX (skip index 0 = validator), fetch metaAndAssetCtxs
+      // For each HIP-3 DEX (skip nulls = validator slots), fetch metaAndAssetCtxs
       const dexes: any[] = [];
       const hip3Dexes = dexList.filter((d: any) => d !== null);
 
@@ -1023,11 +1033,11 @@ export class PriceAggregator extends DurableObject<Env> {
       for (let i = 0; i < hip3Dexes.length; i++) {
         const dex = hip3Dexes[i];
         const metaData = metaResults[i] as any;
-        if (!metaData) continue;
+        if (!metaData || !Array.isArray(metaData) || metaData.length < 2) continue;
 
         const meta = metaData[0];
         const ctxs = metaData[1];
-        if (!meta?.universe || !ctxs) continue;
+        if (!meta?.universe || !Array.isArray(ctxs)) continue;
 
         let totalVolume = 0;
         let totalOI = 0;
@@ -1122,10 +1132,16 @@ export class PriceAggregator extends DurableObject<Env> {
           : 0,
         timestamp: Date.now(),
       };
+      this.hip3PollFailures = 0; // Reset on success
     } catch (e) {
       console.error("HIP-3 poll error:", e);
+      this.hip3PollFailures++;
     }
-    this.hip3PollTimer = setTimeout(() => this.pollHip3(), 30000); // Poll every 30s
+    // Exponential backoff on failure: 30s, 60s, 120s, max 300s
+    const delay = this.hip3PollFailures > 0
+      ? Math.min(30000 * Math.pow(2, this.hip3PollFailures - 1), 300000)
+      : 30000;
+    this.hip3PollTimer = setTimeout(() => this.pollHip3(), delay);
   }
 
   private async pollMeta() {

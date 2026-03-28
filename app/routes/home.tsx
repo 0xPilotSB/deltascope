@@ -1131,6 +1131,7 @@ function Hip3Monitor() {
   const [hip3, setHip3] = useState<Hip3Data | null>(null);
   const [selectedDex, setSelectedDex] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -1140,11 +1141,16 @@ function Hip3Monitor() {
         if (res.ok && active) {
           const data = await res.json() as Hip3Data;
           setHip3(data);
+          setError(false);
           if (!selectedDex && data.dexes.length > 0) {
             setSelectedDex(data.dexes[0].name);
           }
+        } else if (active) {
+          setError(true);
         }
-      } catch {}
+      } catch {
+        if (active) setError(true);
+      }
       setLoading(false);
       if (active) setTimeout(poll, 30000);
     };
@@ -1165,6 +1171,20 @@ function Hip3Monitor() {
     );
   }
 
+  if (error && !hip3) {
+    return (
+      <Card className="border-white/5 bg-[#111111] shadow-2xl">
+        <CardContent className="p-6">
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-red-400">Failed to load HIP-3 data — retrying...</span>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const dataAge = Math.round((Date.now() - hip3.timestamp) / 1000);
+
   const activeDex = hip3.dexes.find(d => d.name === selectedDex) ?? hip3.dexes[0];
   const totalVolume = hip3.hip3TotalVolume24h + hip3.validatorVolume24h;
 
@@ -1180,8 +1200,9 @@ function Hip3Monitor() {
             {hip3.totalDexes} DEXs · {hip3.totalAssets} Assets
           </Badge>
         </div>
-        <span className="text-[10px] text-muted-foreground">
-          Updated {new Date(hip3.timestamp).toLocaleTimeString()}
+        <span className={`text-[10px] ${dataAge > 120 ? "text-red-400" : dataAge > 60 ? "text-yellow-400" : "text-muted-foreground"}`}>
+          {dataAge > 120 ? "Stale " : ""}Updated {new Date(hip3.timestamp).toLocaleTimeString()}
+          {error && " · retrying..."}
         </span>
       </div>
 
@@ -1291,6 +1312,12 @@ function Hip3Monitor() {
               {/* DEX Info Bar */}
               <div className="px-3 sm:px-6 pb-3 flex flex-wrap items-center gap-2 sm:gap-4 text-xs text-muted-foreground border-b border-white/5">
                 <span>Deployer: <span className="font-mono text-white/60">{activeDex.deployer.slice(0, 6)}...{activeDex.deployer.slice(-4)}</span></span>
+                {activeDex.oracleUpdater && (
+                  <>
+                    <Separator orientation="vertical" className="h-3" />
+                    <span>Oracle: <span className="font-mono text-white/60">{activeDex.oracleUpdater.slice(0, 6)}...{activeDex.oracleUpdater.slice(-4)}</span></span>
+                  </>
+                )}
                 <Separator orientation="vertical" className="h-3" />
                 <span>Volume: <span className="font-mono text-white">{formatCompact(activeDex.totalVolume24h)}</span></span>
                 <Separator orientation="vertical" className="h-3" />
