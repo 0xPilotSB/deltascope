@@ -1008,10 +1008,11 @@ export class PriceAggregator extends DurableObject<Env> {
   private broadcastCount = 0;
 
   private broadcast() {
-    const delta = this.buildDelta();
-    this.cachedJson = null; // Invalidate — rebuilt lazily on next REST request
+    this.dirtyAssets.clear();
+    const snapshot = this.buildSnapshot();
+    this.cachedJson = snapshot; // Reuse for REST too
     for (const ws of this.ctx.getWebSockets()) {
-      try { ws.send(delta); } catch {}
+      try { ws.send(snapshot); } catch {}
     }
     this.broadcastCount++;
   }
