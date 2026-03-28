@@ -19,7 +19,7 @@ function getSessionId(): string {
   if (typeof window === "undefined") return "ssr";
   let id = sessionStorage.getItem("oracle-chat-session");
   if (!id) {
-    id = `chat-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    id = `chat-${crypto.randomUUID()}`;
     sessionStorage.setItem("oracle-chat-session", id);
   }
   return id;
