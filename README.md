@@ -139,6 +139,17 @@ Pyth provides a `confidence` value with every price update — a measure of publ
 - Orderbook visualization
 - Funding rate history
 
+### Predict & Win (`/predict`)
+- Paper prediction game — bet on price direction using live Pyth + Hyperliquid prices
+- UP/DOWN binary predictions on 8 major assets (BTC, ETH, SOL, HYPE, ARB, DOGE, AVAX, LINK)
+- Two time windows: 1 minute (fast) and 5 minutes (standard)
+- Points-based economy: 1,000 starting balance, wager 10/25/50/100 per prediction
+- Alarm-based settlement: predictions resolve automatically against live oracle prices
+- Streak bonuses: 3+ consecutive wins earn +10% bonus per extra win
+- Global leaderboard: compete by points, win rate, and streaks
+- Editable display names, bankrupt reset (to 500 points)
+- Zero real money — validates the prediction market concept before on-chain deployment
+
 ### Latency Monitor (`/latency`)
 - Pyth Oracle Delay (median publish delay across feeds)
 - Hyperliquid REST API round-trip time
@@ -178,10 +189,10 @@ Pyth provides a `confidence` value with every price update — a measure of publ
                     │  │                    (16ms throttle)       │  │
                     │  └────────────────────────────────────────┘  │
                     │                                              │
-                    │  ┌──────────┐  ┌──────────────────────────┐  │
-                    │  │ Chat DO  │  │   React Router 7 (SSR)   │  │
-                    │  │ (AI SDK) │  │   + Security Headers     │  │
-                    │  └──────────┘  └──────────────────────────┘  │
+                    │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
+                    │  │ Chat DO  │  │ PredictionGame│  │ React Router │  │
+                    │  │ (AI SDK) │  │ DO (SQLite)   │  │ 7 (SSR)      │  │
+                    │  └──────────┘  └──────────────┘  └──────────────┘  │
                     └──────────────────────────────────────────────┘
 ```
 
@@ -208,7 +219,7 @@ DeltaScope is a **full-stack application** with a persistent backend, server-sid
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | **Runtime** | Cloudflare Workers | Edge-deployed serverless runtime |
-| **Persistent Backend** | Durable Objects (×3) | `PriceAggregator` — stateful price engine with 4 upstream connections, 24/7 alarm keep-alive; `Chat` — AI agent DO; `ChatSessionsDO` — session index |
+| **Persistent Backend** | Durable Objects (×4) | `PriceAggregator` — stateful price engine with 4 upstream connections, 24/7 alarm keep-alive; `PredictionGame` — paper prediction market with SQLite settlement; `Chat` — AI agent DO; `ChatSessionsDO` — session index |
 | **Oracle Ingestion** | Pyth Network Hermes | Dual WebSocket (main + beta) + REST polling every 1s — triple-source freshness dedup |
 | **Oracle Ingestion (Pro)** | Pyth Lazer (optional) | 3 redundant WS endpoints, `real_time` channel, sub-50ms updates |
 | **DEX Data** | Hyperliquid API | WebSocket (`allMids` stream) + REST polling every 3s (`metaAndAssetCtxs`) |
@@ -295,9 +306,12 @@ deltascope/
 │   ├── routes/
 │   │   ├── home.tsx             # Dashboard — price table, stats, HIP-3
 │   │   ├── analysis.tsx         # Ticker deep-dive with charts
+│   │   ├── predict.tsx          # Predict & Win — paper prediction game
 │   │   ├── latency.tsx          # Infrastructure latency monitor
 │   │   ├── developers.tsx       # API docs page
 │   │   └── chat.tsx             # Full-page chat view
+│   ├── schemas/
+│   │   └── prediction.ts        # Zod validation for predictions
 │   ├── stores/
 │   │   └── price-store.ts       # Zustand store — WS connection, tick aggregation
 │   ├── root.tsx                 # App shell, meta tags, preconnect hints
@@ -305,6 +319,7 @@ deltascope/
 ├── workers/
 │   ├── app.ts                   # Worker entry — routing, security headers, caching
 │   ├── price-aggregator.ts      # Core DO — Pyth + HL ingestion, fan-out, latency tracking
+│   ├── prediction-game.ts       # Prediction DO — SQLite, settlement alarms, leaderboard
 │   ├── chat.ts                  # AI chat agent (Workers AI + 6 Pyth tools)
 │   ├── chat-sessions.ts         # Chat session index DO
 │   ├── pyth-tools.ts            # 6 AI tools: search, prices, historical, TWAP, analysis
@@ -313,6 +328,54 @@ deltascope/
 ├── package.json
 └── LICENSE                      # Apache 2.0
 ```
+
+---
+
+## Predict & Win — How It Works
+
+The prediction game is a **paper trading system** that validates the prediction market concept before moving to real smart contracts on HyperEVM.
+
+### Settlement Flow
+
+```
+User clicks UP/DOWN
+       │
+       ▼
+┌──────────────────────────┐
+│  PredictionGame DO        │
+│  1. Validate wager        │
+│  2. Fetch entry price     │◀── PriceAggregator DO (/prices)
+│  3. Deduct points         │
+│  4. Store prediction      │
+│  5. Schedule alarm        │
+└──────────────────────────┘
+       │
+       ▼  (alarm fires after duration + 1s)
+┌──────────────────────────┐
+│  Settlement               │
+│  1. Fetch exit price      │◀── PriceAggregator DO (/prices)
+│  2. Compare direction     │
+│  3. Calculate payout      │
+│  4. Update points/streak  │
+│  5. Reschedule if pending │
+└──────────────────────────┘
+```
+
+### Scoring System
+
+| Action | Points |
+|--------|--------|
+| Starting balance | 1,000 |
+| Win | +wager amount |
+| Loss | -wager amount (already deducted at placement) |
+| Streak bonus (3+) | +10% per extra win beyond 2 |
+| Bankrupt reset | Reset to 500 |
+| Price unchanged | Full refund |
+| Oracle unavailable | Full refund |
+
+### SQLite Schema
+
+The `PredictionGame` DO uses two tables: `users` (id, display_name, points, wins, losses, streak, best_streak) and `predictions` (asset, direction, entry_price, target_time, wager, status, exit_price, points_delta). Settlement runs via Durable Object alarms every 5 seconds.
 
 ---
 
@@ -364,6 +427,35 @@ curl https://deltascope.site/api/prices | jq '.assets[] | {symbol, pythPrice, ma
 - Origin validation on WebSocket upgrades
 - HttpOnly session cookies for chat
 - No secrets in client bundle
+
+---
+
+## Roadmap
+
+DeltaScope is evolving from a price intelligence dashboard into a full prediction market platform on HyperEVM (Hyperliquid's EVM chain).
+
+### Completed
+- [x] Real-time oracle & DEX price monitoring (8 assets)
+- [x] Pyth Pro (Lazer) integration for sub-50ms updates
+- [x] Infrastructure latency monitoring with TradingView charts
+- [x] AI chat assistant with 6 Pyth-powered tools
+- [x] Predict & Win paper prediction game with leaderboard
+- [x] Ticker analysis with top trader positioning data
+
+### Next Up
+- [ ] On-chain prediction market contracts (Solidity on HyperEVM testnet)
+- [ ] Wallet connection (wagmi + viem for EVM)
+- [ ] Pyth confidence-aware settlement (refund on unreliable oracle data)
+- [ ] Dual oracle strategy: HyperEVM native precompile + Pyth confidence gates
+- [ ] CPMM-based dynamic pricing for prediction shares
+- [ ] Liquidity provider system with fee distribution
+
+### Future
+- [ ] HyperEVM mainnet deployment
+- [ ] Multi-asset prediction pools
+- [ ] Early exit mechanism (sell positions before settlement)
+- [ ] Mobile-optimized trading experience
+- [ ] Tournament mode with prize pools
 
 ---
 
