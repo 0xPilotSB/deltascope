@@ -140,6 +140,10 @@ export class PriceAggregator extends DurableObject<Env> {
   private hip3Data: any = null;
   private hip3PollTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Minute-level latency aggregation buffer (flushed every 60s)
+  private latencyMinuteBuffer: Array<{ pyth: number; hlRest: number; hlWs: number; publishDelay: number }> = [];
+  private lastMinuteFlush = 0;
+
   // ─── Perf: exponent cache ──────────────────────────────
   private expoCache: Map<number, number> = new Map([
     [-10, 1e-10], [-9, 1e-9], [-8, 1e-8], [-7, 1e-7], [-6, 1e-6],
@@ -208,7 +212,7 @@ export class PriceAggregator extends DurableObject<Env> {
       updated_at INTEGER
     )`);
 
-    // 1-second OHLC candles for chart history (kept 24h)
+    // 1-second OHLC candles for chart history (kept 7 days)
     sql.exec(`CREATE TABLE IF NOT EXISTS price_candles (
       symbol TEXT NOT NULL,
       t INTEGER NOT NULL,
@@ -216,11 +220,29 @@ export class PriceAggregator extends DurableObject<Env> {
       PRIMARY KEY (symbol, t)
     ) WITHOUT ROWID`);
 
-    // Latency samples (kept 24h)
+    // Fine-grained latency samples every 5s (kept 24h)
     sql.exec(`CREATE TABLE IF NOT EXISTS latency_history (
       t INTEGER PRIMARY KEY,
       pyth REAL, hl_rest REAL, hl_ws REAL,
       publish_delay REAL, ws_rtt REAL
+    )`);
+
+    // 1-minute aggregated latency stats (kept 7 days — for co-location analysis)
+    sql.exec(`CREATE TABLE IF NOT EXISTS latency_minutes (
+      t INTEGER PRIMARY KEY,
+      pyth_p50 REAL, pyth_p95 REAL, pyth_p99 REAL, pyth_max REAL,
+      hl_rest_p50 REAL, hl_rest_p95 REAL, hl_rest_max REAL,
+      hl_ws_p50 REAL, hl_ws_p95 REAL, hl_ws_max REAL,
+      publish_delay_avg REAL, publish_delay_max REAL,
+      sample_count INTEGER
+    )`);
+
+    // Source uptime events (kept 7 days — tracks connection drops/reconnects)
+    sql.exec(`CREATE TABLE IF NOT EXISTS source_events (
+      t INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      event TEXT NOT NULL,
+      detail TEXT
     )`);
 
     // Last HIP-3 snapshot JSON
@@ -232,6 +254,8 @@ export class PriceAggregator extends DurableObject<Env> {
     // Indexes for time-range queries and cleanup
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_candles_t ON price_candles(t)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_latency_t ON latency_history(t)`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_latency_min_t ON latency_minutes(t)`);
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_source_events_t ON source_events(t)`);
 
     this.sqliteReady = true;
   }
@@ -296,6 +320,9 @@ export class PriceAggregator extends DurableObject<Env> {
     if (!this.sqliteReady) return;
     const sql = this.ctx.storage.sql;
     const now = Date.now();
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const SEVEN_DAYS_S = 7 * 24 * 60 * 60;
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
     // Batch upsert price state
     for (const [sym, st] of this.state) {
@@ -322,21 +349,43 @@ export class PriceAggregator extends DurableObject<Env> {
       );
     }
 
-    // Prune candles older than 24h
-    sql.exec("DELETE FROM price_candles WHERE t < ?", candleT - 86400);
+    // Prune candles older than 7 days
+    sql.exec("DELETE FROM price_candles WHERE t < ?", candleT - SEVEN_DAYS_S);
 
-    // Persist latency sample
+    // Persist fine-grained latency sample (kept 24h)
     if (this.upstreamActive) {
+      const pythMs = this.usingPythPro ? this.pythProLatencyMs : this.pythPublishDelayMs;
+      const hlRestMs = this.hlRestLatencyMs;
+      const hlWsMs = this.hlWsIntervalMs;
+
       sql.exec(
         `INSERT OR REPLACE INTO latency_history VALUES (?,?,?,?,?,?)`,
-        now,
-        this.usingPythPro ? this.pythProLatencyMs : this.pythPublishDelayMs,
-        this.hlRestLatencyMs, this.hlWsIntervalMs,
-        this.pythPublishDelayMs, 0,
+        now, pythMs, hlRestMs, hlWsMs, this.pythPublishDelayMs, 0,
       );
-      // Prune older than 24h
-      sql.exec("DELETE FROM latency_history WHERE t < ?", now - 86400000);
+      // Prune fine-grained samples older than 24h
+      sql.exec("DELETE FROM latency_history WHERE t < ?", now - ONE_DAY_MS);
+
+      // Buffer for minute-level aggregation
+      this.latencyMinuteBuffer.push({
+        pyth: pythMs,
+        hlRest: hlRestMs,
+        hlWs: hlWsMs,
+        publishDelay: this.pythPublishDelayMs,
+      });
+
+      // Flush minute aggregation every 60s
+      const currentMinute = Math.floor(now / 60000) * 60000;
+      if (currentMinute > this.lastMinuteFlush && this.latencyMinuteBuffer.length > 0) {
+        this.flushMinuteLatency(sql, currentMinute);
+        this.lastMinuteFlush = currentMinute;
+      }
     }
+
+    // Prune minute-level latency older than 7 days
+    sql.exec("DELETE FROM latency_minutes WHERE t < ?", now - SEVEN_DAYS_MS);
+
+    // Prune source events older than 7 days
+    sql.exec("DELETE FROM source_events WHERE t < ?", now - SEVEN_DAYS_MS);
 
     // Persist HIP-3 snapshot
     if (this.hip3Data) {
@@ -345,6 +394,51 @@ export class PriceAggregator extends DurableObject<Env> {
         JSON.stringify(this.hip3Data), now,
       );
     }
+  }
+
+  /** Compute percentiles and flush minute-level latency stats */
+  private flushMinuteLatency(sql: any, minuteTs: number) {
+    const buf = this.latencyMinuteBuffer;
+    if (buf.length === 0) return;
+
+    const percentile = (arr: number[], p: number): number => {
+      const sorted = arr.filter((v) => v > 0).sort((a, b) => a - b);
+      if (sorted.length === 0) return 0;
+      const idx = Math.ceil(sorted.length * p / 100) - 1;
+      return sorted[Math.max(0, idx)];
+    };
+
+    const pythArr = buf.map((b) => b.pyth);
+    const hlRestArr = buf.map((b) => b.hlRest);
+    const hlWsArr = buf.map((b) => b.hlWs);
+    const delayArr = buf.map((b) => b.publishDelay);
+
+    sql.exec(
+      `INSERT OR REPLACE INTO latency_minutes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      minuteTs,
+      percentile(pythArr, 50), percentile(pythArr, 95), percentile(pythArr, 99),
+      Math.max(0, ...pythArr),
+      percentile(hlRestArr, 50), percentile(hlRestArr, 95),
+      Math.max(0, ...hlRestArr),
+      percentile(hlWsArr, 50), percentile(hlWsArr, 95),
+      Math.max(0, ...hlWsArr),
+      delayArr.reduce((a, b) => a + b, 0) / (delayArr.length || 1),
+      Math.max(0, ...delayArr),
+      buf.length,
+    );
+
+    this.latencyMinuteBuffer = [];
+  }
+
+  /** Record a source event (connect/disconnect/error) */
+  private recordSourceEvent(source: string, event: string, detail?: string) {
+    if (!this.sqliteReady) return;
+    try {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO source_events VALUES (?,?,?,?)`,
+        Date.now(), source, event, detail ?? null,
+      );
+    } catch {}
   }
 
   private startPersistTimer() {
@@ -452,6 +546,86 @@ export class PriceAggregator extends DurableObject<Env> {
         headers: {
           "Content-Type": "application/json",
           "Cache-Control": "no-cache",
+        },
+      });
+    }
+
+    // ─── Historical latency (7-day, minute-resolution) ──
+    if (url.pathname === "/latency/history") {
+      if (!this.sqliteReady) {
+        return new Response(JSON.stringify({ minutes: [], events: [] }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const sql = this.ctx.storage.sql;
+      const range = url.searchParams.get("range") || "24h";
+      const rangeMs: Record<string, number> = {
+        "1h": 3600000,
+        "6h": 21600000,
+        "24h": 86400000,
+        "3d": 259200000,
+        "7d": 604800000,
+      };
+      const since = Date.now() - (rangeMs[range] ?? 86400000);
+
+      const minutes = [];
+      for (const row of sql.exec(
+        `SELECT * FROM latency_minutes WHERE t > ? ORDER BY t ASC`, since
+      )) {
+        minutes.push({
+          t: row.t,
+          pythP50: row.pyth_p50, pythP95: row.pyth_p95, pythP99: row.pyth_p99, pythMax: row.pyth_max,
+          hlRestP50: row.hl_rest_p50, hlRestP95: row.hl_rest_p95, hlRestMax: row.hl_rest_max,
+          hlWsP50: row.hl_ws_p50, hlWsP95: row.hl_ws_p95, hlWsMax: row.hl_ws_max,
+          publishDelayAvg: row.publish_delay_avg, publishDelayMax: row.publish_delay_max,
+          samples: row.sample_count,
+        });
+      }
+
+      const events = [];
+      for (const row of sql.exec(
+        `SELECT * FROM source_events WHERE t > ? ORDER BY t DESC LIMIT 200`, since
+      )) {
+        events.push({
+          t: row.t, source: row.source, event: row.event, detail: row.detail,
+        });
+      }
+
+      return new Response(JSON.stringify({ minutes, events }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=30",
+        },
+      });
+    }
+
+    // ─── Historical candles (7-day) ──
+    if (url.pathname === "/candles") {
+      if (!this.sqliteReady) {
+        return new Response(JSON.stringify([]), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      const sql = this.ctx.storage.sql;
+      const symbol = url.searchParams.get("symbol") || "BTC";
+      const range = url.searchParams.get("range") || "1h";
+      const rangeS: Record<string, number> = {
+        "1h": 3600, "6h": 21600, "24h": 86400, "3d": 259200, "7d": 604800,
+      };
+      const since = Math.floor(Date.now() / 1000) - (rangeS[range] ?? 3600);
+
+      const candles = [];
+      for (const row of sql.exec(
+        `SELECT t, o, h, l, c FROM price_candles WHERE symbol = ? AND t > ? ORDER BY t ASC`,
+        symbol, since
+      )) {
+        candles.push({ t: row.t, o: row.o, h: row.h, l: row.l, c: row.c });
+      }
+
+      return new Response(JSON.stringify(candles), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=5",
         },
       });
     }
@@ -630,6 +804,7 @@ export class PriceAggregator extends DurableObject<Env> {
       this.pythProWs[idx] = ws;
       this.pythProConnected[idx] = true;
       this.reconnectAttempts[idx] = 0;
+      this.recordSourceEvent("pyth-pro", "connected", `shard-${idx}`);
 
       // Subscription 1: real_time channel for BTC, ETH, SOL (sub-50ms)
       ws.send(JSON.stringify({
@@ -676,6 +851,7 @@ export class PriceAggregator extends DurableObject<Env> {
       ws.addEventListener("close", () => {
         this.pythProConnected[idx] = false;
         this.pythProWs[idx] = null;
+        this.recordSourceEvent("pyth-pro", "disconnected", `shard-${idx}`);
         if (this.upstreamActive) {
           this.reconnectTimers[idx] = setTimeout(() => this.connectPythPro(idx, token), this.reconnectDelay(idx));
         }
@@ -750,6 +926,7 @@ export class PriceAggregator extends DurableObject<Env> {
         this.pythHermesConnected = true;
       }
       this.reconnectAttempts[reconnIdx] = 0;
+      this.recordSourceEvent("pyth-hermes", "connected", isBeta ? "beta" : "primary");
 
       ws.send(JSON.stringify({
         type: "subscribe",
@@ -772,6 +949,7 @@ export class PriceAggregator extends DurableObject<Env> {
           this.pythHermesConnected = false;
           this.pythHermesWs = null;
         }
+        this.recordSourceEvent("pyth-hermes", "disconnected", isBeta ? "beta" : "primary");
         if (this.upstreamActive) {
           this.reconnectTimers[reconnIdx] = setTimeout(
             () => this.connectPythHermes(endpoint, isBeta),
@@ -931,6 +1109,7 @@ export class PriceAggregator extends DurableObject<Env> {
       this.hlWs = ws;
       this.hlConnected = true;
       this.reconnectAttempts[4] = 0;
+      this.recordSourceEvent("hyperliquid", "connected");
 
       ws.send(JSON.stringify({
         method: "subscribe",
@@ -944,6 +1123,7 @@ export class PriceAggregator extends DurableObject<Env> {
       ws.addEventListener("close", () => {
         this.hlConnected = false;
         this.hlWs = null;
+        this.recordSourceEvent("hyperliquid", "disconnected");
         if (this.upstreamActive) {
           this.reconnectTimers[4] = setTimeout(() => this.connectHlWs(), this.reconnectDelay(4));
         }

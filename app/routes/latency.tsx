@@ -8,6 +8,7 @@ import type { Route } from "./+types/latency";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "~/components/ui/card";
 import { Badge } from "~/components/ui/badge";
 import { LatencyChart, type LatencySample } from "~/components/latency-chart";
+import { HistoricalLatencyChart, type HistoricalMinute, type SourceEvent } from "~/components/historical-latency-chart";
 import { usePriceStore } from "~/stores/price-store";
 import { MobileMenu } from "~/components/mobile-nav";
 import { OracleChatPopup } from "~/components/oracle-chat";
@@ -282,6 +283,31 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
 
   const onlineCount = probes.filter((p) => p.status === "online").length;
 
+  // ─── Historical 7-day latency data ──────────────────────
+  const RANGES = ["1h", "6h", "24h", "3d", "7d"] as const;
+  type Range = typeof RANGES[number];
+  const [histRange, setHistRange] = useState<Range>("24h");
+  const [histMinutes, setHistMinutes] = useState<HistoricalMinute[]>([]);
+  const [histEvents, setHistEvents] = useState<SourceEvent[]>([]);
+  const [histLoading, setHistLoading] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setHistLoading(true);
+    (async () => {
+      try {
+        const res = await fetch(`/api/latency/history?range=${histRange}`);
+        if (res.ok && active) {
+          const data = await res.json() as { minutes: HistoricalMinute[]; events: SourceEvent[] };
+          setHistMinutes(data.minutes);
+          setHistEvents(data.events);
+        }
+      } catch {}
+      if (active) setHistLoading(false);
+    })();
+    return () => { active = false; };
+  }, [histRange]);
+
   return (
     <main className="min-h-screen bg-[#0a0e14] text-white">
       {/* NavHeader */}
@@ -458,6 +484,89 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
             <LatencyChart history={history} height={300} />
           </CardContent>
         </Card>
+
+        {/* Historical Latency (7-day persistence) */}
+        <Card className="border-white/5 bg-[#111111] shadow-2xl">
+          <CardHeader className="pb-3">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <CardTitle className="text-lg" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>
+                  Historical Latency
+                </CardTitle>
+                <CardDescription>
+                  Minute-aggregated percentiles — p50 / p95 / p99 — stored up to 7 days
+                </CardDescription>
+              </div>
+              <div className="flex gap-1">
+                {RANGES.map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => setHistRange(r)}
+                    className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                      histRange === r
+                        ? "bg-emerald-400/20 text-emerald-400 font-medium"
+                        : "bg-white/5 text-muted-foreground hover:text-white hover:bg-white/10"
+                    }`}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {histLoading ? (
+              <div className="flex items-center justify-center h-[300px] text-muted-foreground text-sm">
+                Loading historical data...
+              </div>
+            ) : histMinutes.length === 0 ? (
+              <div className="flex items-center justify-center h-[300px] text-muted-foreground text-sm">
+                No historical data yet — data accumulates over time (1-minute resolution)
+              </div>
+            ) : (
+              <HistoricalLatencyChart minutes={histMinutes} height={300} />
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Source Events Timeline */}
+        {histEvents.length > 0 && (
+          <Card className="border-white/5 bg-[#111111] shadow-2xl">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>
+                Source Events
+              </CardTitle>
+              <CardDescription>
+                Connection state changes — last {histRange} ({histEvents.length} events)
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="max-h-[300px] overflow-y-auto space-y-1">
+                {histEvents.slice(0, 100).map((ev, i) => {
+                  const isConnect = ev.event === "connect";
+                  const dt = new Date(ev.t);
+                  const timeStr = dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                  const dateStr = dt.toLocaleDateString([], { month: "short", day: "numeric" });
+                  return (
+                    <div key={`${ev.t}-${ev.source}-${i}`} className="flex items-center gap-3 py-1.5 px-2 rounded hover:bg-white/[0.02] text-xs">
+                      <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isConnect ? "bg-emerald-400" : "bg-red-400"}`} />
+                      <span className="text-muted-foreground w-[120px] flex-shrink-0 font-mono">
+                        {dateStr} {timeStr}
+                      </span>
+                      <span className="font-medium w-[140px] flex-shrink-0">{ev.source}</span>
+                      <span className={isConnect ? "text-emerald-400" : "text-red-400"}>
+                        {ev.event}
+                      </span>
+                      {ev.detail && (
+                        <span className="text-muted-foreground truncate">{ev.detail}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Source Health Table */}
         <Card className="border-white/5 bg-[#111111] shadow-2xl">

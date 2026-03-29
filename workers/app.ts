@@ -223,6 +223,30 @@ export default {
       return response;
     }
 
+    // ─── Historical data endpoints (7-day retention) ───
+
+    if (url.pathname === "/api/latency/history") {
+      const doUrl = new URL("/latency/history", request.url);
+      doUrl.search = url.search; // Pass ?range= query param
+      const res = await fetchWithFailover(env, () =>
+        new Request(doUrl, { headers: request.headers }),
+      );
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
+      return response;
+    }
+
+    if (url.pathname === "/api/candles") {
+      const doUrl = new URL("/candles", request.url);
+      doUrl.search = url.search; // Pass ?symbol=&range= query params
+      const res = await fetchWithFailover(env, () =>
+        new Request(doUrl, { headers: request.headers }),
+      );
+      const response = addSecurityHeaders(new Response(res.body, res));
+      response.headers.set("Cache-Control", "public, max-age=5, stale-while-revalidate=10");
+      return response;
+    }
+
     if (url.pathname === "/api/history") {
       const doUrl = new URL("/history", request.url);
       doUrl.search = url.search;
