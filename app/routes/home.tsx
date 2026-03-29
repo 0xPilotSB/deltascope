@@ -35,7 +35,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Slider } from "~/components/ui/slider";
-import { usePriceStore, type DashboardData } from "~/stores/price-store";
+import { usePriceStore, type DashboardData, type AssetData } from "~/stores/price-store";
 import { TVChart, TIMEFRAMES, type ChartType } from "~/components/tv-chart";
 import { MobileMenu } from "~/components/mobile-nav";
 import { OracleChatPopup } from "~/components/oracle-chat";
@@ -52,6 +52,111 @@ const ASSET_COLORS: Record<string, string> = {
   AVAX: "#e84142",
   LINK: "#2a5ada",
 };
+
+// Pre-computed badge styles — avoids object allocation on every render
+const ASSET_BADGE_STYLES: Record<string, React.CSSProperties> = Object.fromEntries(
+  Object.entries(ASSET_COLORS).map(([symbol, color]) => [
+    symbol,
+    { backgroundColor: `${color}20`, color },
+  ])
+);
+
+// ─── Memoized Price Table Row (P0 fix — prevents 8×60fps re-renders) ──
+
+const PriceRow = React.memo(function PriceRow({ asset }: { asset: AssetData }) {
+  const discColor =
+    asset.oracleDiscrepancy < 0.1
+      ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/5"
+      : asset.oracleDiscrepancy < 0.5
+      ? "text-yellow-400 border-yellow-400/30 bg-yellow-400/5"
+      : "text-red-400 border-red-400/30 bg-red-400/5";
+
+  return (
+    <TableRow className="border-white/5 hover:bg-white/[0.02]">
+      {/* Asset */}
+      <TableCell className="pl-6">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
+            style={ASSET_BADGE_STYLES[asset.symbol]}
+          >
+            {asset.symbol.slice(0, 2)}
+          </div>
+          <div>
+            <span className="font-semibold text-sm">{asset.symbol}</span>
+            <span className="text-muted-foreground text-xs ml-1">/USD</span>
+          </div>
+        </div>
+      </TableCell>
+
+      {/* Pyth Oracle Price */}
+      <TableCell className="text-right">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="font-mono text-sm cursor-help border-b border-dotted border-white/20">
+              {formatPrice(asset.pythPrice)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            <div className="text-xs space-y-1">
+              <p>
+                <span className="text-muted-foreground">Confidence:</span>{" "}
+                {"\u00B1"}{formatPrice(asset.pythConfidence)}
+              </p>
+              {asset.bestBidPrice && asset.bestAskPrice ? (
+                <>
+                  <p><span className="text-muted-foreground">Best Bid:</span> {formatPrice(asset.bestBidPrice)}</p>
+                  <p><span className="text-muted-foreground">Best Ask:</span> {formatPrice(asset.bestAskPrice)}</p>
+                  <p>
+                    <span className="text-muted-foreground">Spread:</span>{" "}
+                    {formatPrice(asset.bestAskPrice - asset.bestBidPrice)}
+                    {" "}({((asset.bestAskPrice - asset.bestBidPrice) / asset.pythPrice * 100).toFixed(4)}%)
+                  </p>
+                </>
+              ) : null}
+              {asset.publisherCount ? (
+                <p><span className="text-muted-foreground">Publishers:</span> {asset.publisherCount}</p>
+              ) : null}
+              <p><span className="text-muted-foreground">Expo:</span> {asset.pythExpo}</p>
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      </TableCell>
+
+      {/* Mark Price */}
+      <TableCell className="text-right font-mono text-sm">
+        {formatPrice(asset.markPrice)}
+      </TableCell>
+
+      {/* Oracle Discrepancy */}
+      <TableCell className="text-right">
+        <Badge variant="outline" className={`font-mono text-xs ${discColor}`}>
+          {asset.oracleDiscrepancy.toFixed(4)}%
+        </Badge>
+      </TableCell>
+
+      {/* 24h Change */}
+      <TableCell className={`text-right font-mono text-sm ${asset.change24h >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+        {formatPercent(asset.change24h)}
+      </TableCell>
+
+      {/* Funding Rate (annualized) */}
+      <TableCell className={`text-right font-mono text-sm ${asset.fundingRate >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+        {formatPercent(asset.fundingRate * 24 * 365 * 100, 3)}
+      </TableCell>
+
+      {/* Open Interest */}
+      <TableCell className="text-right font-mono text-sm text-muted-foreground">
+        {formatCompact(asset.openInterest)}
+      </TableCell>
+
+      {/* Volume */}
+      <TableCell className="text-right font-mono text-sm text-muted-foreground pr-6">
+        {formatCompact(asset.volume24h)}
+      </TableCell>
+    </TableRow>
+  );
+});
 
 const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
@@ -129,7 +234,7 @@ function NavHeader({
   statusContent?: React.ReactNode;
 }) {
   return (
-    <header className="border-b border-white/5 bg-[#0a0a0a]/80 backdrop-blur-xl sticky top-0 z-50 relative">
+    <header className="border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur-sm sticky top-0 z-50 relative will-change-transform">
       <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-3 flex items-center justify-between">
         {/* Left: Logo + Branding */}
         <div className="flex items-center gap-6">
@@ -284,8 +389,13 @@ function DashboardLoader({ dataPromise }: { dataPromise: Promise<DashboardData |
 }
 
 function Dashboard({ initialData }: { initialData: DashboardData | null }) {
-  // ── Zustand store ──
-  const { data, isConnected, latencyMs, rawTicks, connect, disconnect, setInitialData } = usePriceStore();
+  // ── Zustand store — granular selectors to prevent full re-render on every tick ──
+  const data = usePriceStore((s) => s.data);
+  const isConnected = usePriceStore((s) => s.isConnected);
+  const latencyMs = usePriceStore((s) => s.latencyMs);
+  const connect = usePriceStore((s) => s.connect);
+  const disconnect = usePriceStore((s) => s.disconnect);
+  const setInitialData = usePriceStore((s) => s.setInitialData);
 
   // Hydrate store with SSR data and connect WebSocket
   useEffect(() => {
@@ -318,34 +428,36 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
   // Initial ticks snapshot — only used for chart's first render.
   // After init, the chart subscribes directly to the store for 60fps updates.
   const chartTicks = useMemo(() => {
-    return rawTicks.get(chartAsset) ?? [];
+    return usePriceStore.getState().rawTicks.get(chartAsset) ?? [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartAsset]);
 
   const chartCurrentPrice = useMemo(() => {
     const asset = data?.assets.find((a) => a.symbol === chartAsset);
     return asset?.pythPrice;
-  }, [data?.assets, chartAsset]);
+  }, [data?.timestamp, chartAsset]); // timestamp changes per-tick; avoids array ref issue
 
   // Set entry price only on asset change (not every tick)
   const prevCalcAssetRef = useRef(calcAsset);
+  const dataRef = useRef(data);
+  dataRef.current = data;
   useEffect(() => {
-    if (!data) return;
+    if (!dataRef.current) return;
     // Only auto-set on initial load (empty) or asset switch
     if (entryPrice === "" || calcAsset !== prevCalcAssetRef.current) {
-      const asset = data.assets.find((a) => a.symbol === calcAsset);
+      const asset = dataRef.current.assets.find((a) => a.symbol === calcAsset);
       if (asset) {
         setEntryPrice(asset.markPrice.toFixed(2));
       }
       prevCalcAssetRef.current = calcAsset;
     }
-  }, [calcAsset, data, entryPrice]);
+  }, [calcAsset, entryPrice]);
 
   // Live mark price for the selected calc asset
   const calcCurrentPrice = useMemo(() => {
     const asset = data?.assets.find((a) => a.symbol === calcAsset);
     return asset?.markPrice ?? 0;
-  }, [data?.assets, calcAsset]);
+  }, [data?.timestamp, calcAsset]);
 
   // ── Memoized Stats Bar Values ──
   const statsBarValues = useMemo(() => ({
@@ -574,131 +686,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
                 </TableHeader>
                 <TableBody>
                   {(data?.assets ?? []).map((asset) => (
-                    <TableRow
-                      key={asset.symbol}
-                      className="border-white/5 hover:bg-white/[0.02] transition-colors"
-                    >
-                      {/* Asset */}
-                      <TableCell className="pl-6">
-                        <div className="flex items-center gap-3">
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
-                            style={{
-                              backgroundColor: `${ASSET_COLORS[asset.symbol]}20`,
-                              color: ASSET_COLORS[asset.symbol],
-                            }}
-                          >
-                            {asset.symbol.slice(0, 2)}
-                          </div>
-                          <div>
-                            <span className="font-semibold text-sm">{asset.symbol}</span>
-                            <span className="text-muted-foreground text-xs ml-1">/USD</span>
-                          </div>
-                        </div>
-                      </TableCell>
-
-                      {/* Pyth Oracle Price */}
-                      <TableCell className="text-right">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <span className="font-mono text-sm cursor-help border-b border-dotted border-white/20">
-                              {formatPrice(asset.pythPrice)}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            <div className="text-xs space-y-1">
-                              <p>
-                                <span className="text-muted-foreground">Confidence:</span>{" "}
-                                {"\u00B1"}{formatPrice(asset.pythConfidence)}
-                              </p>
-                              {asset.bestBidPrice && asset.bestAskPrice ? (
-                                <>
-                                  <p>
-                                    <span className="text-muted-foreground">Best Bid:</span>{" "}
-                                    {formatPrice(asset.bestBidPrice)}
-                                  </p>
-                                  <p>
-                                    <span className="text-muted-foreground">Best Ask:</span>{" "}
-                                    {formatPrice(asset.bestAskPrice)}
-                                  </p>
-                                  <p>
-                                    <span className="text-muted-foreground">Spread:</span>{" "}
-                                    {formatPrice(asset.bestAskPrice - asset.bestBidPrice)}
-                                    {" "}({((asset.bestAskPrice - asset.bestBidPrice) / asset.pythPrice * 100).toFixed(4)}%)
-                                  </p>
-                                </>
-                              ) : null}
-                              {asset.publisherCount ? (
-                                <p>
-                                  <span className="text-muted-foreground">Publishers:</span>{" "}
-                                  {asset.publisherCount}
-                                </p>
-                              ) : null}
-                              <p>
-                                <span className="text-muted-foreground">Expo:</span>{" "}
-                                {asset.pythExpo}
-                              </p>
-                              <p>
-                                <span className="text-muted-foreground">Published:</span>{" "}
-                                {new Date(asset.publishTime * (asset.publishTime > 1e12 ? 0.001 : 1000)).toLocaleTimeString()}
-                              </p>
-                            </div>
-                          </TooltipContent>
-                        </Tooltip>
-                      </TableCell>
-
-                      {/* Mark Price */}
-                      <TableCell className="text-right font-mono text-sm">
-                        {formatPrice(asset.markPrice)}
-                      </TableCell>
-
-                      {/* Oracle Discrepancy */}
-                      <TableCell className="text-right">
-                        <Badge
-                          variant="outline"
-                          className={`font-mono text-xs ${
-                            asset.oracleDiscrepancy < 0.1
-                              ? "text-emerald-400 border-emerald-400/30 bg-emerald-400/5"
-                              : asset.oracleDiscrepancy < 0.5
-                              ? "text-yellow-400 border-yellow-400/30 bg-yellow-400/5"
-                              : "text-red-400 border-red-400/30 bg-red-400/5"
-                          }`}
-                        >
-                          {asset.oracleDiscrepancy.toFixed(4)}%
-                        </Badge>
-                      </TableCell>
-
-                      {/* 24h Change */}
-                      <TableCell
-                        className={`text-right font-mono text-sm ${
-                          asset.change24h >= 0 ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {formatPercent(asset.change24h)}
-                      </TableCell>
-
-                      {/* Funding Rate (annualized) */}
-                      <TableCell
-                        className={`text-right font-mono text-sm ${
-                          asset.fundingRate >= 0 ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {formatPercent(
-                          asset.fundingRate * 24 * 365 * 100,
-                          3
-                        )}
-                      </TableCell>
-
-                      {/* Open Interest */}
-                      <TableCell className="text-right font-mono text-sm text-muted-foreground">
-                        {formatCompact(asset.openInterest)}
-                      </TableCell>
-
-                      {/* Volume */}
-                      <TableCell className="text-right font-mono text-sm text-muted-foreground pr-6">
-                        {formatCompact(asset.volume24h)}
-                      </TableCell>
-                    </TableRow>
+                    <PriceRow key={asset.symbol} asset={asset} />
                   ))}
                 </TableBody>
               </Table>

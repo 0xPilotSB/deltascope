@@ -316,26 +316,30 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             _deltaMap.clear();
             for (const d of msg.a) _deltaMap.set(d.s, d);
 
-            // Mutate existing asset objects in place for dirty assets
-            // (avoids creating 8 new objects + new array every frame)
+            // Create NEW objects for dirty assets (enables React.memo on table rows)
+            // Only dirty rows get new refs = only those rows re-render
             const assets = prev.assets;
             for (let i = 0; i < assets.length; i++) {
               const asset = assets[i];
               const d = _deltaMap.get(asset.symbol);
               if (!d) continue;
-              asset.pythPrice = d.p ?? asset.pythPrice;
-              asset.pythConfidence = d.c ?? asset.pythConfidence;
-              asset.pythExpo = d.e ?? asset.pythExpo;
-              asset.markPrice = d.m ?? asset.markPrice;
-              asset.oracleDiscrepancy = d.d ?? asset.oracleDiscrepancy;
-              asset.change24h = d.ch ?? asset.change24h;
-              asset.fundingRate = d.f ?? asset.fundingRate;
-              asset.openInterest = d.oi ?? asset.openInterest;
-              asset.volume24h = d.v ?? asset.volume24h;
-              asset.publishTime = d.pt ?? asset.publishTime;
-              asset.bestBidPrice = d.bb ?? asset.bestBidPrice;
-              asset.bestAskPrice = d.ba ?? asset.bestAskPrice;
-              asset.publisherCount = d.pc ?? asset.publisherCount;
+              // Shallow clone — new ref triggers React.memo re-render for this row only
+              assets[i] = {
+                ...asset,
+                pythPrice: d.p ?? asset.pythPrice,
+                pythConfidence: d.c ?? asset.pythConfidence,
+                pythExpo: d.e ?? asset.pythExpo,
+                markPrice: d.m ?? asset.markPrice,
+                oracleDiscrepancy: d.d ?? asset.oracleDiscrepancy,
+                change24h: d.ch ?? asset.change24h,
+                fundingRate: d.f ?? asset.fundingRate,
+                openInterest: d.oi ?? asset.openInterest,
+                volume24h: d.v ?? asset.volume24h,
+                publishTime: d.pt ?? asset.publishTime,
+                bestBidPrice: d.bb ?? asset.bestBidPrice,
+                bestAskPrice: d.ba ?? asset.bestAskPrice,
+                publisherCount: d.pc ?? asset.publisherCount,
+              };
             }
 
             // Recompute aggregates only if meta fields (funding, OI, volume) changed
@@ -364,15 +368,18 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
               discrepancies = prev.discrepancyCount;
             }
 
-            // Reuse prev.data object with mutated assets — avoid new DashboardData allocation
-            prev.assets = assets;
-            prev.totalVolume24h = totalVolume;
-            prev.totalOpenInterest = totalOI;
-            prev.avgFundingRate = assets.length > 0 ? fundingSum / assets.length : 0;
-            prev.discrepancyCount = discrepancies;
-            prev.timestamp = msg.t;
-            prev.serverTs = msg.st;
-            if (msg.src) prev.sources = msg.src;
+            // Reuse field values but create a new data object ref
+            // so Zustand selectors detect the change
+            const updatedData: DashboardData = {
+              assets,
+              totalVolume24h: totalVolume,
+              totalOpenInterest: totalOI,
+              avgFundingRate: assets.length > 0 ? fundingSum / assets.length : 0,
+              discrepancyCount: discrepancies,
+              timestamp: msg.t,
+              serverTs: msg.st,
+              sources: msg.src ?? prev.sources,
+            };
 
             if (tabVisible) {
               // Only append ticks for assets that actually changed (in delta)
@@ -382,12 +389,12 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
               }
               appendTicks(get().rawTicks, dirtyAssets, msg.t);
               set({
-                data: prev,
+                data: updatedData,
                 latencyMs: Math.max(0, lat),
                 tickVersion: get().tickVersion + 1,
               });
             } else {
-              set({ data: prev, latencyMs: Math.max(0, lat) });
+              set({ data: updatedData, latencyMs: Math.max(0, lat) });
             }
           }
         } catch {
