@@ -1072,6 +1072,8 @@ export class PriceAggregator extends DurableObject<Env> {
   private handleHermesMessage(raw: string | ArrayBuffer) {
     try {
       const data = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+      // Fast-path: skip non-price messages without full JSON.parse
+      if (!data.includes('"price_update"')) return;
       const msg = JSON.parse(data);
       if (msg.type === "price_update" && msg.price_feed) {
         const feed = msg.price_feed;

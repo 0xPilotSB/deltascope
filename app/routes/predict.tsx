@@ -131,7 +131,7 @@ export async function action({ request, context }: Route.ActionArgs) {
 
 function NavHeader() {
   return (
-    <header className="border-b border-white/5 bg-[#0a0a0a]/80 backdrop-blur-xl sticky top-0 z-50 relative">
+    <header className="border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur-sm sticky top-0 z-50 relative will-change-transform">
       <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-3">
@@ -212,8 +212,10 @@ export default function PredictPage({ loaderData }: Route.ComponentProps) {
   const isSubmitting = fetcher.state !== "idle";
   const actionError = (fetcher.data as any)?.error;
 
-  // Connect to live price store
-  const { data: priceData, connect, disconnect } = usePriceStore();
+  // Connect to live price store — granular selectors for 60fps
+  const priceData = usePriceStore((s) => s.data);
+  const connect = usePriceStore((s) => s.connect);
+  const disconnect = usePriceStore((s) => s.disconnect);
 
   useEffect(() => {
     connect();

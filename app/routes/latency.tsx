@@ -141,7 +141,12 @@ function timeAgo(ts: number | null): string {
 export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
   const { initialData } = loaderData;
   const [latencyData, setLatencyData] = useState<LatencyData | null>(initialData);
-  const { data: priceData, isConnected, latencyMs, connect, disconnect } = usePriceStore();
+  // Granular selectors — prevent full re-render on every 60fps tick
+  const priceData = usePriceStore((s) => s.data);
+  const isConnected = usePriceStore((s) => s.isConnected);
+  const latencyMs = usePriceStore((s) => s.latencyMs);
+  const connect = usePriceStore((s) => s.connect);
+  const disconnect = usePriceStore((s) => s.disconnect);
 
   // Connect to WebSocket for real-time data
   useEffect(() => {
@@ -311,7 +316,7 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
   return (
     <main className="min-h-screen bg-[#0a0e14] text-white">
       {/* NavHeader */}
-      <header className="sticky top-0 z-50 bg-[#0a0e14]/80 backdrop-blur-xl border-b border-white/5 relative">
+      <header className="sticky top-0 z-50 bg-[#0a0e14]/95 backdrop-blur-sm border-b border-white/5 relative will-change-transform">
         <div className="max-w-[1400px] mx-auto px-3 sm:px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-6">
             <Link to="/" className="flex items-center gap-2 text-white font-bold text-lg" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>

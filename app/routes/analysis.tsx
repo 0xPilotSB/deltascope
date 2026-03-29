@@ -281,7 +281,7 @@ export async function loader({}: Route.LoaderArgs) {
 
 function NavHeader() {
   return (
-    <header className="border-b border-white/5 bg-[#0a0a0a]/80 backdrop-blur-xl sticky top-0 z-50 relative">
+    <header className="border-b border-white/5 bg-[#0a0a0a]/95 backdrop-blur-sm sticky top-0 z-50 relative will-change-transform">
       <div className="max-w-[1440px] mx-auto px-3 sm:px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-3">
