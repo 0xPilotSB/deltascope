@@ -53,6 +53,7 @@ function TVChartInner({
   const lastTickVersionRef = useRef(0);
   const seededRef = useRef(false); // Has chart received initial setData with real data?
   const prevChartTypeRef = useRef(chartType); // Track previous chartType for swap detection
+  const lastCandleStartRef = useRef(-1); // Track last bar time for auto-scroll on new bar
 
   // Keep refs in sync with props
   symbolRef.current = symbol;
@@ -76,6 +77,8 @@ function TVChartInner({
       borderColor: "rgba(255,255,255,0.05)",
       timeVisible: true,
       secondsVisible: true,
+      rightOffset: 5,
+      shiftVisibleRangeOnNewBar: true,
     },
   }), []);
 
@@ -153,6 +156,7 @@ function TVChartInner({
         }
       }
       chart.timeScale().fitContent();
+      chart.timeScale().scrollToRealTime();
 
       // Price line
       if (currentPrice && seriesRef.current) {
@@ -207,7 +211,10 @@ function TVChartInner({
               seededRef.current = true;
             }
           }
-          if (seededRef.current) chart.timeScale().fitContent();
+          if (seededRef.current) {
+            chart.timeScale().fitContent();
+            chart.timeScale().scrollToRealTime();
+          }
           return;
         }
 
@@ -216,6 +223,9 @@ function TVChartInner({
         const lastTick = arr[arr.length - 1];
         const s = Math.floor(lastTick.time / 1000);
         const candleStart = s - (s % curTf);
+
+        const isNewBar = candleStart !== lastCandleStartRef.current;
+        lastCandleStartRef.current = candleStart;
 
         if (curType === "candlestick") {
           // Find all ticks in the current candle period
@@ -238,6 +248,11 @@ function TVChartInner({
             time: candleStart as any,
             value: lastTick.price,
           });
+        }
+
+        // Auto-scroll to real-time when a new bar appears
+        if (isNewBar) {
+          chart.timeScale().scrollToRealTime();
         }
 
         // Update price line
@@ -306,6 +321,8 @@ function TVChartInner({
       );
     }
     chartRef.current.timeScale().fitContent();
+    chartRef.current.timeScale().scrollToRealTime();
+    lastCandleStartRef.current = -1; // Reset bar tracking
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, timeframe, chartType]);
 

@@ -152,7 +152,7 @@ export default {
         env.PRICE_AGGREGATOR.idFromName(DO_STANDBY),
       );
       ctx.waitUntil(
-        standbyStub.fetch(new Request(new URL("/prices", request.url))).catch(() => {}),
+        standbyStub.fetch(new Request(new URL("/prices", request.url))).catch((e) => console.error("Standby warm-up failed:", e)),
       );
     }
 
@@ -253,9 +253,15 @@ export default {
       ownerId = crypto.randomUUID();
     }
 
-    const response = await requestHandler(request, {
-      cloudflare: { env, ctx, ownerId },
-    });
+    let response: Response;
+    try {
+      response = await requestHandler(request, {
+        cloudflare: { env, ctx, ownerId },
+      });
+    } catch (error) {
+      console.error("SSR error:", error);
+      return new Response("Internal Server Error", { status: 500 });
+    }
 
     const secured = addSecurityHeaders(response);
 

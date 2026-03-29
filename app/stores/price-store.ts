@@ -255,6 +255,12 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
 
     alive = true;
 
+    // Remove any stale visibility listener before adding a new one
+    const existingHandler = (usePriceStore as any).__visibilityHandler;
+    if (existingHandler) {
+      document.removeEventListener("visibilitychange", existingHandler);
+    }
+
     // ── Visibility API: pause/resume WS when tab hidden/visible ──
     const handleVisibility = () => {
       tabVisible = !document.hidden;
@@ -369,7 +375,12 @@ export const usePriceStore = create<PriceStore>()((set, get) => ({
             if (msg.src) prev.sources = msg.src;
 
             if (tabVisible) {
-              appendTicks(get().rawTicks, assets, msg.t);
+              // Only append ticks for assets that actually changed (in delta)
+              const dirtyAssets: AssetData[] = [];
+              for (const asset of assets) {
+                if (_deltaMap.has(asset.symbol)) dirtyAssets.push(asset);
+              }
+              appendTicks(get().rawTicks, dirtyAssets, msg.t);
               set({
                 data: prev,
                 latencyMs: Math.max(0, lat),

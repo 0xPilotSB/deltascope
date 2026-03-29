@@ -111,6 +111,7 @@ export class PriceAggregator extends DurableObject<Env> {
   // Timers
   private metaPollTimer: ReturnType<typeof setTimeout> | null = null;
   private pythRestPollTimer: ReturnType<typeof setTimeout> | null = null; // REST supplement
+  private pythRestInFlight = false; // Prevent concurrent REST polls
   private reconnectTimers: (ReturnType<typeof setTimeout> | null)[] = [null, null, null, null, null, null]; // +1 for beta
   private reconnectAttempts: number[] = [0, 0, 0, 0, 0, 0];
   private broadcastPending = false;
@@ -181,8 +182,12 @@ export class PriceAggregator extends DurableObject<Env> {
     }
     // Load persisted data before handling any requests
     ctx.blockConcurrencyWhile(async () => {
-      this.initSqlite();
-      this.loadFromSqlite();
+      try {
+        this.initSqlite();
+        this.loadFromSqlite();
+      } catch (e) {
+        console.error("SQLite init failed:", e);
+      }
     });
     // 24/7 keep-alive: set alarm on construction so DO never sleeps
     ctx.storage.setAlarm(Date.now() + 25000);
@@ -820,7 +825,7 @@ export class PriceAggregator extends DurableObject<Env> {
   private pythRestBetaUrl: string | null = null;
 
   private async pollPythRest() {
-    if (!this.upstreamActive || this.usingPythPro) return;
+    if (!this.upstreamActive || this.usingPythPro || this.pythRestInFlight) return;
 
     // Rate limit check
     if (!this.canRequestHermes()) {
@@ -829,6 +834,7 @@ export class PriceAggregator extends DurableObject<Env> {
       return;
     }
 
+    this.pythRestInFlight = true;
     try {
       if (!this.pythRestUrl) {
         const feedIds = Object.values(PYTH_HERMES_IDS);
@@ -880,6 +886,7 @@ export class PriceAggregator extends DurableObject<Env> {
         }
       }
     } catch (e) { console.error("Hermes REST poll error:", e); }
+    finally { this.pythRestInFlight = false; }
     // REST supplement — dual WS is primary. Poll every 2s (dual-race stays under 30/10s limit).
     this.pythRestPollTimer = setTimeout(() => this.pollPythRest(), 2000);
   }
