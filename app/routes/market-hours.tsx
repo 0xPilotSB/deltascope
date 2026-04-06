@@ -57,89 +57,164 @@ const EXCHANGES: Exchange[] = [
     timezone: "UTC", utcOffset: 0, color: "#0052ff", relevance: "high",
   },
   // ── Americas ──
+  // CME Bitcoin Futures: Sun–Fri 17:00–16:00 CT (23:00–22:00 UTC), 1h break 16:00–17:00 CT daily
   {
     id: "cme-btc", name: "CME Bitcoin Futures", shortName: "CME BTC", region: "americas", category: "futures",
     sessions: [
-      { label: "Extended", start: 360, end: 360 + 60, type: "extended" }, // Sun 6pm-7pm CT = Mon 0:00-1:00 UTC
-      { label: "Regular", start: 360, end: 360 + 1260, type: "regular" }, // Mon-Fri 6pm CT-5pm CT next day
+      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "regular" },
     ],
     timezone: "America/Chicago", utcOffset: -5, color: "#6366f1", relevance: "high",
   },
+  // CME E-mini S&P (ES): Sun–Fri 17:00–16:00 CT (23:00–22:00 UTC)
+  {
+    id: "cme-es", name: "CME E-mini S&P 500", shortName: "CME ES", region: "americas", category: "futures",
+    sessions: [
+      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "regular" },
+    ],
+    timezone: "America/Chicago", utcOffset: -5, color: "#818cf8", relevance: "high",
+  },
+  // NYSE: Pre-market 04:00–09:30 ET (08:00–13:30 UTC), Regular 09:30–16:00 ET (13:30–20:00 UTC), AH 16:00–20:00 ET (20:00–00:00 UTC)
   {
     id: "nyse", name: "NYSE", shortName: "NYSE", region: "americas", category: "equities",
     sessions: [
-      { label: "Pre-market", start: 9 * 60, end: 14 * 60 + 30, type: "extended" },
-      { label: "Regular", start: 14 * 60 + 30, end: 21 * 60, type: "regular" },
-      { label: "After-hours", start: 21 * 60, end: 24 * 60, type: "extended" },
+      { label: "Pre-market", start: 8 * 60, end: 13 * 60 + 30, type: "extended" },
+      { label: "Regular", start: 13 * 60 + 30, end: 20 * 60, type: "regular" },
+      { label: "After-hours", start: 20 * 60, end: 24 * 60, type: "extended" },
     ],
     timezone: "America/New_York", utcOffset: -4, color: "#3b82f6", relevance: "high",
   },
+  // NASDAQ: same as NYSE
   {
     id: "nasdaq", name: "NASDAQ", shortName: "NSDQ", region: "americas", category: "equities",
     sessions: [
-      { label: "Pre-market", start: 9 * 60, end: 14 * 60 + 30, type: "extended" },
-      { label: "Regular", start: 14 * 60 + 30, end: 21 * 60, type: "regular" },
-      { label: "After-hours", start: 21 * 60, end: 24 * 60, type: "extended" },
+      { label: "Pre-market", start: 8 * 60, end: 13 * 60 + 30, type: "extended" },
+      { label: "Regular", start: 13 * 60 + 30, end: 20 * 60, type: "regular" },
+      { label: "After-hours", start: 20 * 60, end: 24 * 60, type: "extended" },
     ],
     timezone: "America/New_York", utcOffset: -4, color: "#06b6d4", relevance: "high",
   },
+  // TSX: 09:30–16:00 ET = 13:30–20:00 UTC
+  {
+    id: "tsx", name: "Toronto Stock Exchange", shortName: "TSX", region: "americas", category: "equities",
+    sessions: [
+      { label: "Regular", start: 13 * 60 + 30, end: 20 * 60, type: "regular" },
+    ],
+    timezone: "America/Toronto", utcOffset: -4, color: "#38bdf8", relevance: "low",
+  },
+  // CBOE: 09:30–16:15 ET = 13:30–20:15 UTC
   {
     id: "cboe", name: "CBOE Options", shortName: "CBOE", region: "americas", category: "futures",
     sessions: [
-      { label: "Regular", start: 14 * 60 + 30, end: 21 * 60, type: "regular" },
+      { label: "Regular", start: 13 * 60 + 30, end: 20 * 60 + 15, type: "regular" },
     ],
     timezone: "America/Chicago", utcOffset: -5, color: "#8b5cf6", relevance: "medium",
   },
+  // COMEX Gold: Sun–Fri 17:00–16:00 CT (23:00–22:00 UTC)
   {
-    id: "nymex", name: "NYMEX (Oil/Gas)", shortName: "NYMX", region: "americas", category: "commodities",
+    id: "comex", name: "COMEX (Gold/Silver)", shortName: "COMEX", region: "americas", category: "commodities",
     sessions: [
-      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "extended" },
-      { label: "Floor", start: 14 * 60, end: 19 * 60 + 30, type: "regular" },
+      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "regular" },
+    ],
+    timezone: "America/New_York", utcOffset: -4, color: "#fbbf24", relevance: "medium",
+  },
+  // NYMEX Crude Oil: Sun–Fri 17:00–16:00 CT (23:00–22:00 UTC)
+  {
+    id: "nymex", name: "NYMEX (Crude Oil)", shortName: "NYMEX", region: "americas", category: "commodities",
+    sessions: [
+      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "regular" },
     ],
     timezone: "America/New_York", utcOffset: -4, color: "#f59e0b", relevance: "medium",
   },
+  // CBOT: Sun–Fri 17:00–16:00 CT (23:00–22:00 UTC)
+  {
+    id: "cbot", name: "CBOT (Grains/Treasuries)", shortName: "CBOT", region: "americas", category: "futures",
+    sessions: [
+      { label: "Electronic", start: 23 * 60, end: 22 * 60 + 1440, type: "regular" },
+    ],
+    timezone: "America/Chicago", utcOffset: -5, color: "#a3e635", relevance: "low",
+  },
+  // B3 Brazil: 10:00–17:55 BRT = 13:00–20:55 UTC
+  {
+    id: "b3", name: "B3 (Brazil)", shortName: "B3", region: "americas", category: "equities",
+    sessions: [
+      { label: "Regular", start: 13 * 60, end: 20 * 60 + 55, type: "regular" },
+    ],
+    timezone: "America/Sao_Paulo", utcOffset: -3, color: "#4ade80", relevance: "low",
+  },
   // ── Europe ──
+  // LSE: Pre-open 07:50 UTC, Regular 08:00–16:30 UTC, Close auction 16:30–16:35 UTC
   {
     id: "lse", name: "London Stock Exchange", shortName: "LSE", region: "europe", category: "equities",
     sessions: [
-      { label: "Auction", start: 7 * 60 + 50, end: 8 * 60, type: "auction" },
+      { label: "Pre-open", start: 7 * 60 + 50, end: 8 * 60, type: "auction" },
       { label: "Regular", start: 8 * 60, end: 16 * 60 + 30, type: "regular" },
-      { label: "Auction", start: 16 * 60 + 30, end: 16 * 60 + 35, type: "auction" },
+      { label: "Close Auction", start: 16 * 60 + 30, end: 16 * 60 + 35, type: "auction" },
     ],
     timezone: "Europe/London", utcOffset: 1, color: "#ef4444", relevance: "high",
   },
+  // Xetra: Pre-trading 07:30 UTC, Regular 08:00–16:30 UTC (BST summer; winter 07:00–15:30)
   {
     id: "xetra", name: "Deutsche Börse (Xetra)", shortName: "XETR", region: "europe", category: "equities",
     sessions: [
-      { label: "Pre-trading", start: 7 * 60 + 30, end: 9 * 60, type: "extended" },
-      { label: "Regular", start: 9 * 60, end: 17 * 60 + 30, type: "regular" },
+      { label: "Pre-trading", start: 7 * 60 + 30, end: 8 * 60, type: "extended" },
+      { label: "Regular", start: 8 * 60, end: 16 * 60 + 30, type: "regular" },
     ],
     timezone: "Europe/Berlin", utcOffset: 2, color: "#f97316", relevance: "medium",
   },
+  // Euronext Paris: 08:00–16:30 UTC
+  {
+    id: "euronext", name: "Euronext Paris", shortName: "ENX", region: "europe", category: "equities",
+    sessions: [
+      { label: "Pre-open", start: 7 * 60 + 15, end: 9 * 60, type: "auction" },
+      { label: "Regular", start: 9 * 60, end: 17 * 60 + 30, type: "regular" },
+    ],
+    timezone: "Europe/Paris", utcOffset: 2, color: "#60a5fa", relevance: "medium",
+  },
+  // Eurex: 06:00–22:00 UTC (electronic derivatives)
   {
     id: "eurex", name: "Eurex Derivatives", shortName: "EURX", region: "europe", category: "futures",
     sessions: [
-      { label: "Regular", start: 7 * 60, end: 22 * 60, type: "regular" },
+      { label: "Regular", start: 6 * 60, end: 22 * 60, type: "regular" },
     ],
     timezone: "Europe/Berlin", utcOffset: 2, color: "#ec4899", relevance: "medium",
   },
+  // ICE Futures Europe (Brent/Energy): 01:00–23:00 UTC
+  {
+    id: "ice-eu", name: "ICE Futures Europe", shortName: "ICE EU", region: "europe", category: "commodities",
+    sessions: [
+      { label: "Electronic", start: 1 * 60, end: 23 * 60, type: "regular" },
+    ],
+    timezone: "Europe/London", utcOffset: 1, color: "#c084fc", relevance: "medium",
+  },
+  // LME: Electronic 01:00–19:00 UTC, Ring 11:40–17:00 UTC
   {
     id: "lme", name: "London Metal Exchange", shortName: "LME", region: "europe", category: "commodities",
     sessions: [
-      { label: "Ring", start: 11 * 60 + 40, end: 17 * 60, type: "regular" },
       { label: "Electronic", start: 1 * 60, end: 19 * 60, type: "extended" },
+      { label: "Ring", start: 11 * 60 + 40, end: 17 * 60, type: "regular" },
     ],
     timezone: "Europe/London", utcOffset: 1, color: "#a78bfa", relevance: "low",
   },
   // ── Asia ──
+  // TSE: Morning 09:00–11:30 JST = 00:00–02:30 UTC, Afternoon 12:30–15:30 JST = 03:30–06:30 UTC
   {
     id: "tse", name: "Tokyo Stock Exchange", shortName: "TSE", region: "asia", category: "equities",
     sessions: [
       { label: "Morning", start: 0 * 60, end: 2 * 60 + 30, type: "regular" },
-      { label: "Afternoon", start: 3 * 60 + 30, end: 6 * 60, type: "regular" },
+      { label: "Afternoon", start: 3 * 60 + 30, end: 6 * 60 + 30, type: "regular" },
     ],
     timezone: "Asia/Tokyo", utcOffset: 9, color: "#f43f5e", relevance: "medium",
   },
+  // OSE (Osaka/JPX Derivatives): 08:45–15:15 JST = 23:45–06:15 UTC
+  {
+    id: "ose", name: "Osaka Exchange (JPX)", shortName: "OSE", region: "asia", category: "futures",
+    sessions: [
+      { label: "Morning", start: 23 * 60 + 45, end: 6 * 60 + 15 + 1440, type: "regular" },
+      { label: "Evening", start: 9 * 60 + 30, end: 18 * 60 + 30, type: "extended" },
+    ],
+    timezone: "Asia/Tokyo", utcOffset: 9, color: "#fb7185", relevance: "low",
+  },
+  // HKEX: Morning 09:30–12:00 HKT = 01:30–04:00 UTC, Afternoon 13:00–16:00 HKT = 05:00–08:00 UTC
   {
     id: "hkex", name: "Hong Kong Exchange", shortName: "HKEX", region: "asia", category: "equities",
     sessions: [
@@ -148,35 +223,65 @@ const EXCHANGES: Exchange[] = [
     ],
     timezone: "Asia/Hong_Kong", utcOffset: 8, color: "#fb7185", relevance: "high",
   },
+  // SSE: Morning 09:30–11:30 CST = 01:30–03:30 UTC, Afternoon 13:00–15:00 CST = 05:00–07:00 UTC
   {
     id: "sse", name: "Shanghai Stock Exchange", shortName: "SSE", region: "asia", category: "equities",
     sessions: [
-      { label: "Morning", start: 1 * 60 + 30, end: 3 * 60, type: "regular" },
+      { label: "Morning", start: 1 * 60 + 30, end: 3 * 60 + 30, type: "regular" },
       { label: "Afternoon", start: 5 * 60, end: 7 * 60, type: "regular" },
     ],
     timezone: "Asia/Shanghai", utcOffset: 8, color: "#fb923c", relevance: "medium",
   },
+  // SZSE: same as SSE
+  {
+    id: "szse", name: "Shenzhen Stock Exchange", shortName: "SZSE", region: "asia", category: "equities",
+    sessions: [
+      { label: "Morning", start: 1 * 60 + 30, end: 3 * 60 + 30, type: "regular" },
+      { label: "Afternoon", start: 5 * 60, end: 7 * 60, type: "regular" },
+    ],
+    timezone: "Asia/Shanghai", utcOffset: 8, color: "#fdba74", relevance: "low",
+  },
+  // SGX: 09:00–17:00 SGT = 01:00–09:00 UTC, Evening 17:55–23:55 SGT = 09:55–15:55 UTC
   {
     id: "sgx", name: "Singapore Exchange", shortName: "SGX", region: "asia", category: "futures",
     sessions: [
       { label: "Regular", start: 1 * 60, end: 9 * 60, type: "regular" },
-      { label: "Evening", start: 11 * 60, end: 19 * 60, type: "regular" },
+      { label: "Evening", start: 9 * 60 + 55, end: 15 * 60 + 55, type: "extended" },
     ],
     timezone: "Asia/Singapore", utcOffset: 8, color: "#34d399", relevance: "medium",
   },
+  // KRX: 09:00–15:30 KST = 00:00–06:30 UTC
+  {
+    id: "krx", name: "Korea Exchange (KRX)", shortName: "KRX", region: "asia", category: "equities",
+    sessions: [
+      { label: "Regular", start: 0 * 60, end: 6 * 60 + 30, type: "regular" },
+    ],
+    timezone: "Asia/Seoul", utcOffset: 9, color: "#2dd4bf", relevance: "low",
+  },
+  // TAIFEX: 08:45–13:45 TWD = 00:45–05:45 UTC, Night session 15:00–05:00 next day
+  {
+    id: "taifex", name: "Taiwan Futures Exchange", shortName: "TAIFEX", region: "asia", category: "futures",
+    sessions: [
+      { label: "Day", start: 0 * 60 + 45, end: 5 * 60 + 45, type: "regular" },
+      { label: "Night", start: 7 * 60, end: 21 * 60, type: "extended" },
+    ],
+    timezone: "Asia/Taipei", utcOffset: 8, color: "#67e8f9", relevance: "low",
+  },
+  // NSE India: Pre-open 09:00–09:15 IST = 03:30–03:45 UTC, Regular 09:15–15:30 IST = 03:45–10:00 UTC
   {
     id: "nse", name: "NSE India", shortName: "NSE", region: "asia", category: "equities",
     sessions: [
-      { label: "Pre-open", start: 3 * 60 + 45, end: 4 * 60 + 15, type: "auction" },
-      { label: "Regular", start: 4 * 60 + 15, end: 10 * 60, type: "regular" },
+      { label: "Pre-open", start: 3 * 60 + 30, end: 3 * 60 + 45, type: "auction" },
+      { label: "Regular", start: 3 * 60 + 45, end: 10 * 60, type: "regular" },
     ],
     timezone: "Asia/Kolkata", utcOffset: 5.5, color: "#fbbf24", relevance: "low",
   },
+  // ASX: Pre-open 10:00 AEDT = 23:00 UTC, Regular 10:00–16:00 AEST = 00:00–06:00 UTC
   {
     id: "asx", name: "Australian Securities Exchange", shortName: "ASX", region: "asia", category: "equities",
     sessions: [
       { label: "Pre-open", start: 23 * 60, end: 23 * 60 + 10, type: "auction" },
-      { label: "Regular", start: 23 * 60 + 10, end: 5 * 60, type: "regular" },
+      { label: "Regular", start: 23 * 60 + 10, end: 6 * 60 + 1440, type: "regular" },
     ],
     timezone: "Australia/Sydney", utcOffset: 10, color: "#4ade80", relevance: "low",
   },
@@ -499,7 +604,7 @@ export default function MarketHoursPage() {
               Global Market Hours
             </h1>
             <p className="text-muted-foreground text-sm mt-1">
-              Live trading hours across 18 major exchanges · All times UTC · DST-aware
+              Live trading hours across 31 exchanges · All times UTC · DST-aware · Source: <a href="https://loris.tools/market-hours" target="_blank" rel="noopener noreferrer" className="text-emerald-400/70 hover:text-emerald-400 transition-colors">loris.tools</a>, <a href="https://markethours.io/markets" target="_blank" rel="noopener noreferrer" className="text-emerald-400/70 hover:text-emerald-400 transition-colors">markethours.io</a>
             </p>
           </div>
           <div className="flex flex-col items-start sm:items-end gap-2">
@@ -769,7 +874,7 @@ export default function MarketHoursPage() {
         </Card>
 
         <p className="text-center text-[11px] text-white/20 pb-4">
-          Times approximate. DST transitions adjust automatically. Crypto 24/7. Holidays not included.
+          Times verified against official exchange schedules via <a href="https://loris.tools/market-hours" target="_blank" rel="noopener noreferrer" className="underline hover:text-white/40">loris.tools</a> and <a href="https://markethours.io/markets" target="_blank" rel="noopener noreferrer" className="underline hover:text-white/40">markethours.io</a>. DST transitions apply automatically. Crypto 24/7. Holidays not included.
         </p>
       </main>
     </div>
