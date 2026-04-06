@@ -463,5 +463,6 @@ curl https://deltascope.site/api/prices | jq '.assets[] | {symbol, pythPrice, ma
 - [React Router](https://reactrouter.com/) — Full-stack SSR framework
 - [loris.tools](https://loris.tools/market-hours) — Market hours reference data
 - [markethours.io](https://markethours.io/markets) — Exchange UTC times verification
+- [camelAI](https://camelai.com) — AI-powered development environment used to build this project
 
 Built by [@0xPilotSB](https://github.com/0xPilotSB)
