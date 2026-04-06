@@ -105,6 +105,16 @@ function appendTicks(
       ticks.set(asset.symbol, arr);
     }
 
+    // ── Spike filter: reject ticks >1% from last known price ──
+    // Pyth oracle occasionally emits a bad tick that creates a vertical
+    // spike on the 1s chart. If the new price deviates >1% from the
+    // previous tick, discard it — valid crypto moves don't do this in 1s.
+    if (arr.length > 0) {
+      const last = arr[arr.length - 1].price;
+      const deviation = Math.abs(price - last) / last;
+      if (deviation > 0.01) continue; // >1% in one tick = bad data
+    }
+
     arr.push({ time: timestamp, price });
 
     if (arr.length > MAX_TICKS) {
