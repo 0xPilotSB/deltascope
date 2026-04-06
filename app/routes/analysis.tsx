@@ -72,6 +72,7 @@ const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
   { label: "Predict & Win", href: "/predict" },
   { label: "Latency Monitor", href: "/latency" },
+  { label: "Market Hours", href: "/market-hours" },
   { label: "Developers", href: "/developers" },
   { label: "Community", href: "https://discord.gg/pyth", external: true },
 ];
@@ -339,8 +340,8 @@ function AnalysisSkeleton() {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white">
       <NavHeader />
-      <main className="max-w-[1440px] mx-auto px-6 py-8 space-y-6">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <main className="max-w-[1440px] mx-auto px-3 sm:px-6 py-4 sm:py-8 space-y-4 sm:space-y-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
           {[...Array(4)].map((_, i) => (
             <Card key={i} className="border-white/5 bg-[#111111]">
               <CardContent className="pt-6">
@@ -367,12 +368,12 @@ function AnalysisSkeleton() {
 function StatCard({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
   return (
     <Card className="border-white/5 bg-[#111111] shadow-2xl">
-      <CardContent className="pt-5 pb-4">
+      <CardContent className="p-3 sm:pt-5 sm:pb-4 sm:px-6">
         <div className="flex items-center justify-between mb-1">
-          <p className="text-xs text-muted-foreground uppercase tracking-wider">{label}</p>
-          <span className="text-white/20">{icon}</span>
+          <p className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider leading-tight">{label}</p>
+          <span className="text-white/20 hidden sm:block">{icon}</span>
         </div>
-        <p className="text-2xl font-bold tracking-tight font-mono" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>
+        <p className="text-lg sm:text-2xl font-bold tracking-tight font-mono" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>
           {value}
         </p>
       </CardContent>
@@ -494,7 +495,7 @@ function AnalysisContent({ data }: { data: AnalysisData }) {
   return (
     <>
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
         <StatCard
           label="Traders Analyzed"
           value={`${data.tradersFetched}`}
@@ -665,7 +666,7 @@ export default function AnalysisPage({ loaderData }: Route.ComponentProps) {
         <main className="max-w-[1440px] mx-auto px-3 sm:px-6 py-4 sm:py-8 space-y-4 sm:space-y-6">
           <React.Suspense fallback={
             <div className="space-y-6">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
                 {[...Array(4)].map((_, i) => (
                   <Card key={i} className="border-white/5 bg-[#111111]">
                     <CardContent className="pt-6">

@@ -74,10 +74,10 @@ const PriceRow = React.memo(function PriceRow({ asset }: { asset: AssetData }) {
   return (
     <TableRow className="border-white/5 hover:bg-white/[0.02]">
       {/* Asset */}
-      <TableCell className="pl-6">
-        <div className="flex items-center gap-3">
+      <TableCell className="pl-3 sm:pl-6 sticky left-0 bg-[#111111] z-10">
+        <div className="flex items-center gap-2 sm:gap-3">
           <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold"
+            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center text-[10px] sm:text-xs font-bold shrink-0"
             style={ASSET_BADGE_STYLES[asset.symbol]}
           >
             {asset.symbol.slice(0, 2)}
@@ -162,6 +162,7 @@ const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
   { label: "Predict & Win", href: "/predict" },
   { label: "Latency Monitor", href: "/latency" },
+  { label: "Market Hours", href: "/market-hours" },
   { label: "Developers", href: "/developers" },
   { label: "Community", href: "https://discord.gg/pyth", external: true },
 ];
@@ -359,11 +360,11 @@ function DashboardSkeleton() {
             </>
           }
         />
-        <main className="max-w-[1440px] mx-auto px-6 py-6 space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <main className="max-w-[1440px] mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
             {[1, 2, 3, 4].map((i) => (
               <Card key={i} className="border-white/5 bg-[#111111]">
-                <CardContent className="p-4">
+                <CardContent className="p-3 sm:p-4">
                   <div className="h-4 w-20 bg-white/5 rounded animate-pulse mb-3" />
                   <div className="h-8 w-32 bg-white/5 rounded animate-pulse" />
                 </CardContent>
@@ -584,7 +585,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
 
         <main className="max-w-[1440px] mx-auto px-3 sm:px-6 py-4 sm:py-6 space-y-4 sm:space-y-6">
           {/* Stats Bar */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
             <StatCard
               title="24h Volume"
               value={statsBarValues.volume}
@@ -658,7 +659,7 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
               <Table>
                 <TableHeader>
                   <TableRow className="border-white/5 hover:bg-transparent">
-                    <TableHead className="pl-6 text-muted-foreground text-xs uppercase tracking-wider">
+                    <TableHead className="pl-3 sm:pl-6 text-muted-foreground text-xs uppercase tracking-wider sticky left-0 bg-[#111111] z-10">
                       Asset
                     </TableHead>
                     <TableHead className="text-muted-foreground text-xs uppercase tracking-wider text-right">
@@ -693,6 +694,9 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
               </div>
             </CardContent>
           </Card>
+
+          {/* Market Hours Widget */}
+          <MarketHoursWidget />
 
           {/* Bottom Section - Two Panels */}
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
@@ -1017,6 +1021,130 @@ function Dashboard({ initialData }: { initialData: DashboardData | null }) {
 
 // ─── Sub-components ────────────────────────────────────────
 
+// ─── Market Hours Widget ────────────────────────────────────
+
+const WIDGET_EXCHANGES = [
+  { id: "hyperliquid", name: "Hyperliquid", color: "#10b981", start: 0, end: 1440, type: "crypto" as const },
+  { id: "binance",     name: "Binance",     color: "#f0b90b", start: 0, end: 1440, type: "crypto" as const },
+  { id: "coinbase",    name: "Coinbase",    color: "#0052ff", start: 0, end: 1440, type: "crypto" as const },
+  { id: "cme-btc",     name: "CME BTC Fut", color: "#6366f1", start: 360, end: 360 + 1260, type: "futures" as const },
+  { id: "nyse",        name: "NYSE",        color: "#3b82f6", start: 14 * 60 + 30, end: 21 * 60, type: "equities" as const },
+  { id: "lse",         name: "LSE",         color: "#ef4444", start: 8 * 60, end: 16 * 60 + 30, type: "equities" as const },
+  { id: "hkex",        name: "HKEX",        color: "#fb7185", start: 1 * 60 + 30, end: 8 * 60, type: "equities" as const },
+  { id: "tse",         name: "TSE",         color: "#f43f5e", start: 0, end: 6 * 60, type: "equities" as const },
+];
+
+function MarketHoursWidget() {
+  const [nowPct, setNowPct] = React.useState(() => {
+    const d = new Date();
+    return ((d.getUTCHours() * 60 + d.getUTCMinutes()) / 1440) * 100;
+  });
+  const [tick, setTick] = React.useState(0);
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      const d = new Date();
+      setNowPct(((d.getUTCHours() * 60 + d.getUTCMinutes()) / 1440) * 100);
+      setTick((t) => t + 1);
+    }, 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  function isActive(start: number, end: number) {
+    const d = new Date();
+    const now = d.getUTCHours() * 60 + d.getUTCMinutes();
+    if (end <= 1440) return now >= start && now < end;
+    return now >= start || now < (end - 1440);
+  }
+
+  const openCount = WIDGET_EXCHANGES.filter((e) => isActive(e.start, e.end)).length;
+
+  return (
+    <Card className="border-white/5 bg-[#111111] shadow-2xl">
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-lg flex items-center gap-2" style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}>
+              <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <circle cx="12" cy="12" r="10" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2" />
+              </svg>
+              Market Hours
+            </CardTitle>
+            <CardDescription>Trading sessions · UTC · live</CardDescription>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">
+              <span className="text-emerald-400 font-semibold">{openCount}</span>/{WIDGET_EXCHANGES.length} open
+            </span>
+            <Link
+              to="/market-hours"
+              className="text-xs text-emerald-400/70 hover:text-emerald-400 transition-colors flex items-center gap-1"
+            >
+              Full view
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M1 9L9 1M9 1H3M9 1V7" />
+              </svg>
+            </Link>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0 pb-4">
+        {/* Hour ticks */}
+        <div className="flex gap-2 mb-1 pl-[6.5rem] sm:pl-[8rem]">
+          {[0,6,12,18,24].map((h) => (
+            <div key={h} className="flex-1 text-[10px] text-white/20 font-mono">
+              {h === 0 ? "00:00" : h === 24 ? "" : `${String(h).padStart(2,"0")}:00`}
+            </div>
+          ))}
+        </div>
+        <div className="space-y-1">
+          {WIDGET_EXCHANGES.map((ex) => {
+            const active = isActive(ex.start, ex.end);
+            const left = `${((ex.start % 1440) / 1440) * 100}%`;
+            const rawWidth = (Math.min(ex.end, 1440) - (ex.start % 1440)) / 1440 * 100;
+            const width = `${rawWidth}%`;
+            return (
+              <div key={ex.id} className="flex items-center gap-2">
+                <div className="w-[6rem] sm:w-[7.5rem] shrink-0 flex items-center gap-1.5">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 transition-all duration-500 ${active ? "shadow-[0_0_5px_currentColor]" : "opacity-30"}`}
+                    style={{ backgroundColor: ex.color }}
+                  />
+                  <span className={`text-[11px] truncate ${active ? "text-white" : "text-white/35"}`}>{ex.name}</span>
+                </div>
+                <div className="flex-1 relative h-5 bg-white/[0.03] rounded overflow-hidden">
+                  {/* Now line */}
+                  <div
+                    className="absolute top-0 bottom-0 w-px bg-emerald-400/60 z-10 transition-all duration-[10000ms] linear"
+                    style={{ left: `${nowPct}%` }}
+                  />
+                  {/* Bar */}
+                  <div
+                    className="absolute top-0.5 bottom-0.5 rounded-sm transition-all duration-500"
+                    style={{
+                      left,
+                      width,
+                      backgroundColor: active ? `${ex.color}cc` : `${ex.color}30`,
+                      boxShadow: active ? `0 0 6px ${ex.color}40` : undefined,
+                    }}
+                  />
+                </div>
+                <div className="w-10 text-right shrink-0">
+                  {active
+                    ? <span className="text-[10px] font-semibold text-emerald-400">OPEN</span>
+                    : <span className="text-[10px] text-white/20">—</span>
+                  }
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 const StatCard = React.memo(function StatCard({
   title,
   value,
@@ -1032,15 +1160,15 @@ const StatCard = React.memo(function StatCard({
 }) {
   return (
     <Card className="border-white/5 bg-[#111111] hover:bg-[#151515] transition-colors">
-      <CardContent className="p-4">
-        <div className="flex items-center justify-between mb-3">
-          <span className="text-xs text-muted-foreground uppercase tracking-wider">
+      <CardContent className="p-3 sm:p-4">
+        <div className="flex items-center justify-between mb-2 sm:mb-3">
+          <span className="text-[10px] sm:text-xs text-muted-foreground uppercase tracking-wider leading-tight">
             {title}
           </span>
-          {icon}
+          <span className="hidden sm:block">{icon}</span>
         </div>
         <p
-          className={`text-2xl font-bold font-mono tracking-tight ${
+          className={`text-lg sm:text-2xl font-bold font-mono tracking-tight ${
             valueColor ?? "text-white"
           }`}
           style={{ fontFamily: "'Space Grotesk Variable', sans-serif" }}
@@ -1048,7 +1176,7 @@ const StatCard = React.memo(function StatCard({
           {value}
         </p>
         {subtitle && (
-          <p className="text-[10px] text-muted-foreground mt-1">
+          <p className="text-[10px] text-muted-foreground mt-1 hidden sm:block">
             {subtitle}
           </p>
         )}

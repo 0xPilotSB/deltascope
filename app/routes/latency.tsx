@@ -20,6 +20,7 @@ const NAV_LINKS = [
   { label: "Ticker Analysis", href: "/analysis" },
   { label: "Predict & Win", href: "/predict" },
   { label: "Latency Monitor", href: "/latency" },
+  { label: "Market Hours", href: "/market-hours" },
   { label: "Developers", href: "/developers" },
   { label: "Community", href: "https://discord.gg/pyth", external: true },
 ];
@@ -399,7 +400,7 @@ export default function LatencyMonitor({ loaderData }: Route.ComponentProps) {
         </div>
 
         {/* Stat Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
           {/* Pyth Oracle Delay */}
           <Card className="border-white/5 bg-[#111111]">
             <CardHeader className="pb-2">

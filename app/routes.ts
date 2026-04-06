@@ -5,6 +5,7 @@ export default [
   route("chat", "routes/chat.tsx"),
   route("analysis", "routes/analysis.tsx"),
   route("latency", "routes/latency.tsx"),
+  route("market-hours", "routes/market-hours.tsx"),
   route("developers", "routes/developers.tsx"),
   route("predict", "routes/predict.tsx"),
   route("api/prices", "routes/api.prices.ts"),
