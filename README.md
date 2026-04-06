@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Real-time Oracle & DEX Intelligence Platform</strong><br/>
-  Monitor Pyth Network oracle prices vs Hyperliquid mark prices — catch discrepancies, track funding rates, and analyze infrastructure latency in real-time.
+  Monitor Pyth Network oracle prices vs Hyperliquid mark prices — catch discrepancies, track funding rates, analyze infrastructure latency, and follow global market hours in real-time.
 </p>
 
 <p align="center">
@@ -55,7 +55,7 @@ We don't just connect to one Pyth endpoint. We run **three parallel Pyth data so
 
 **Why this matters:** Hermes main and beta are separate relay infrastructure with different latency characteristics. REST polling catches updates that WebSocket batching delays. The combination yields ~10-15% lower oracle delay than a single WS connection.
 
-**Implementation:** [`workers/price-aggregator.ts`](workers/price-aggregator.ts) lines 324-329 (dual WS), 526-565 (REST poll), 567-591 (freshness dedup via `publishTime` comparison).
+**Implementation:** [`workers/price-aggregator.ts`](workers/price-aggregator.ts) — dual WS connect, REST poll, freshness dedup via `publishTime` comparison.
 
 ### 2. Pyth Pro (Lazer) Ready — Sub-50ms When Enabled
 
@@ -90,17 +90,21 @@ For each of the 8 tracked assets, DeltaScope computes the **real-time discrepanc
 discrepancy = |pythPrice - markPrice| / markPrice × 100%
 ```
 
-This is displayed per-asset in the Market Overview table with color-coded severity badges. Assets exceeding 0.5% discrepancy are flagged, and a global `discrepancyCount` is shown in the dashboard header.
+Displayed per-asset with color-coded severity badges. Assets exceeding 0.5% are flagged, and a global `discrepancyCount` appears in the dashboard header.
 
-### 4. Publish Delay Analytics
+### 4. Publish Delay Analytics + 7-Day Persistence
 
-The Latency Monitor page computes the **median Pyth publish delay** across all tracked feeds:
+The Latency Monitor tracks the **median Pyth publish delay** across all feeds:
 
 ```
 publishDelay = now() - (publishTime from Pyth)
 ```
 
-This is tracked in a ring buffer (120 samples, ~10 min) and visualized on a TradingView chart alongside Hyperliquid API latency and WebSocket interval metrics. Traders can see exactly how stale their oracle data is at any moment.
+Two-tier persistence in SQLite (Durable Object):
+- **Fine-grained (24h):** 5-second samples for recent analysis
+- **Aggregated (7 days):** 1-minute P50/P95/P99/MAX percentiles for co-location analysis
+
+Source uptime events (WS connect/disconnect) are also persisted for the full 7-day window.
 
 ### 5. AI Chat with 6 Pyth-Powered Tools
 
@@ -115,13 +119,18 @@ The AI assistant (`workers/chat.ts` + `workers/pyth-tools.ts`) has direct access
 | `getHyperliquidData` | Cross-reference with Hyperliquid perps data | Hyperliquid REST API |
 | `analyzePriceFeed` | Full analysis: price + TWAP + deviation + confidence | Multiple endpoints combined |
 
-Example interaction:
-> **User:** "Compare BTC and ETH funding rates"
-> **AI:** Fetches real-time Pyth prices for both, queries Hyperliquid funding/OI, computes discrepancies, and presents a structured comparison.
+### 6. Spike Filter — Tick Integrity
 
-### 6. Confidence Interval Visualization
+Every Pyth tick passes a **1% deviation guard** before being written to the tick buffer:
 
-Pyth provides a `confidence` value with every price update — a measure of publisher agreement. DeltaScope displays this alongside the price, giving traders visibility into **price certainty**, not just price level. Wide confidence = disagreement among publishers = higher risk.
+```typescript
+if (arr.length > 0) {
+  const deviation = Math.abs(price - last) / last;
+  if (deviation > 0.01) continue; // >1% in one tick = bad oracle data
+}
+```
+
+This eliminates chart spikes caused by Pyth oracle noise — valid crypto moves never exceed 1% in a single 1-second interval.
 
 ---
 
@@ -129,43 +138,50 @@ Pyth provides a `confidence` value with every price update — a measure of publ
 
 ### Dashboard (`/`)
 - Real-time price table: 8 major assets with Pyth oracle prices vs Hyperliquid mark prices
-- Oracle discrepancy badges (color-coded by severity)
-- 24h volume, open interest, annualized funding rates
+- Oracle discrepancy badges (color-coded by severity: green <0.1%, yellow <0.5%, red ≥0.5%)
+- 24h volume, open interest, annualized funding rates (live WebSocket)
 - HIP-3 ecosystem overview (permissionless perp DEXs on Hyperliquid)
+- **Market Hours widget** — 8-exchange mini-Gantt with live open/closed status
+- 60fps React rendering via Zustand granular selectors + `React.memo` dirty-only re-renders
+- 1s/5s/15s/30s/1m/5m/15m candlestick + line chart (TradingView Lightweight Charts)
+
+### Market Hours (`/market-hours`)
+- **31 exchanges** across Crypto, Americas, Europe, Asia
+- Live 24-hour UTC Gantt chart with animated now-marker
+- Region + category filters, "Open only" toggle
+- Session overlap analysis: 6 key high-liquidity windows for crypto traders
+- Exchange reference table with live open/extended/closed status
+- Data sourced from [loris.tools](https://loris.tools/market-hours) + [markethours.io](https://markethours.io/markets)
 
 ### Ticker Analysis (`/analysis`)
-- Deep-dive into individual assets
-- TradingView candlestick charts (built from raw tick data)
-- Orderbook visualization
-- Funding rate history
+- Top-20 Hyperliquid leaderboard traders — 474+ open positions across 189 tickers
+- Sort by size, trader count, or PnL
+- Long/short bias bar with net positioning
+- Stats: Traders Analyzed, Active Tickers, Net Long Bias, Last Updated
 
 ### Predict & Win (`/predict`)
-- Paper prediction game — bet on price direction using live Pyth + Hyperliquid prices
-- UP/DOWN binary predictions on 8 major assets (BTC, ETH, SOL, HYPE, ARB, DOGE, AVAX, LINK)
+- Paper prediction game using live Pyth + Hyperliquid prices
+- UP/DOWN binary predictions on 8 major assets
 - Two time windows: 1 minute (fast) and 5 minutes (standard)
 - Points-based economy: 1,000 starting balance, wager 10/25/50/100 per prediction
-- Alarm-based settlement: predictions resolve automatically against live oracle prices
-- Streak bonuses: 3+ consecutive wins earn +10% bonus per extra win
+- Alarm-based settlement — resolves automatically against live oracle prices
+- Streak bonuses: 3+ consecutive wins earn +10% per extra win
 - Global leaderboard: compete by points, win rate, and streaks
-- Editable display names, bankrupt reset (to 500 points)
-- Zero real money — validates the prediction market concept before on-chain deployment
 
 ### Latency Monitor (`/latency`)
 - Pyth Oracle Delay (median publish delay across feeds)
 - Hyperliquid REST API round-trip time
 - WebSocket delivery latency (edge → browser)
 - Overall infrastructure health score (0-100)
-- Multi-line TradingView chart with 10-min rolling history
-- Source health table with P50/P95/MIN/MAX percentiles
+- 7-day historical latency chart with range selector (1h/6h/24h/3d/7d)
+- Source uptime event timeline (WS connect/disconnect events)
+- P50/P95/P99 percentile trends
 
 ### AI Chat Assistant
 - Natural language queries about any Pyth price feed
 - Cross-references Pyth oracle data with Hyperliquid perps
 - 6 structured tools for real-time and historical analysis
 - Accessible via floating chat button on all pages
-
-### Developers (`/developers`)
-- API documentation and integration examples
 
 ---
 
@@ -187,6 +203,12 @@ Pyth provides a `confidence` value with every price update — a measure of publ
                     │  │                            ▼             │  │
                     │  │                    Fan-out to clients    │  │
                     │  │                    (16ms throttle)       │  │
+                    │  │                            │             │  │
+                    │  │  SQLite (DO storage):      │             │  │
+                    │  │  • price_candles (7d)      │             │  │
+                    │  │  • latency_history (24h)   │             │  │
+                    │  │  • latency_minutes (7d)    │             │  │
+                    │  │  • source_events (7d)      │             │  │
                     │  └────────────────────────────────────────┘  │
                     │                                              │
                     │  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  │
@@ -198,56 +220,58 @@ Pyth provides a `confidence` value with every price update — a measure of publ
 
 ### Key Design Decisions
 
-1. **Single Durable Object for all price state** — The `PriceAggregator` DO maintains exactly one instance (`idFromName("global")`) that holds all upstream connections. This means zero coordination overhead and guaranteed consistency — every client sees the same merged state.
+1. **Single Durable Object for all price state** — The `PriceAggregator` DO maintains exactly one instance (`idFromName("global")`) that holds all upstream connections. Zero coordination overhead, guaranteed consistency.
 
-2. **16ms broadcast throttle** — Upstream updates arrive at different rates (Pyth ~400ms, HL ~1000ms). Instead of broadcasting on every tick, we coalesce updates within a 16ms window using `queueMicrotask()` for immediate dispatch or `setTimeout()` for the remaining window.
+2. **16ms broadcast throttle** — Upstream updates arrive at different rates (Pyth ~400ms, HL ~1000ms). Updates are coalesced within a 16ms window using `queueMicrotask()` for immediate dispatch.
 
-3. **Incremental snapshot caching** — Only assets with changed data (`dirtyAssets` set) get their JSON object recomputed. Unchanged assets reuse their cached snapshot object, reducing `JSON.stringify` work on every broadcast.
+3. **Incremental snapshot caching** — Only assets with changed data (`dirtyAssets` set) get JSON recomputed. Unchanged assets reuse cached objects, reducing `JSON.stringify` work.
 
-4. **24/7 keep-alive via DO Alarms** — The DO sets an alarm every 25 seconds. When the alarm fires, it calls `ensureUpstream()` to keep all WebSocket connections alive, even with zero connected clients. This eliminates cold-start delays for the first visitor.
+4. **Two-tier SQLite persistence** — Fine-grained 5s samples (24h) + 1-minute aggregated P50/P95/P99 (7 days). Balances storage cost vs. co-location analysis granularity.
 
-5. **Smart Placement** — Cloudflare's Smart Placement routes the Worker closer to Pyth/Hyperliquid backends rather than the user's edge, reducing upstream fetch latency.
+5. **60fps React rendering** — Granular Zustand selectors (one per field), `React.memo` with shallow-clone dirty detection, pre-computed badge styles, zero in-render object allocation.
+
+6. **24/7 keep-alive via DO Alarms** — Alarm fires every 25 seconds, calls `ensureUpstream()` to keep all WebSocket connections alive with zero connected clients. Eliminates cold-start delays.
+
+7. **Smart Placement** — Cloudflare routes the Worker closer to Pyth/Hyperliquid backends rather than user's edge, reducing upstream fetch latency.
 
 ---
 
-## Tech Stack — Full-Stack Application
-
-DeltaScope is a **full-stack application** with a persistent backend, server-side rendering, and real-time WebSocket infrastructure.
+## Tech Stack
 
 ### Backend
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | **Runtime** | Cloudflare Workers | Edge-deployed serverless runtime |
-| **Persistent Backend** | Durable Objects (×4) | `PriceAggregator` — stateful price engine with 4 upstream connections, 24/7 alarm keep-alive; `PredictionGame` — paper prediction market with SQLite settlement; `Chat` — AI agent DO; `ChatSessionsDO` — session index |
-| **Oracle Ingestion** | Pyth Network Hermes | Dual WebSocket (main + beta) + REST polling every 1s — triple-source freshness dedup |
-| **Oracle Ingestion (Pro)** | Pyth Lazer (optional) | 3 redundant WS endpoints, `real_time` channel, sub-50ms updates |
-| **DEX Data** | Hyperliquid API | WebSocket (`allMids` stream) + REST polling every 3s (`metaAndAssetCtxs`) |
-| **AI Engine** | Vercel AI SDK + Workers AI | Streaming LLM with 6 structured tools querying Pyth + Hyperliquid APIs |
-| **API Layer** | REST + WebSocket | `/api/prices`, `/api/latency`, `/api/hip3` (REST); `/ws/prices` (real-time WS fan-out) |
-| **Security** | CSP + CORS + Origin validation | Hardened headers, WebSocket origin checks, HttpOnly cookies |
+| **Persistent Backend** | Durable Objects (×4) | `PriceAggregator` — stateful price engine; `PredictionGame` — SQLite settlement; `Chat` — AI agent; `ChatSessionsDO` — session index |
+| **Storage** | SQLite (DO) | 7-day latency history, candles, source events |
+| **Oracle Ingestion** | Pyth Network Hermes | Dual WebSocket + REST polling, triple-source dedup |
+| **Oracle Ingestion (Pro)** | Pyth Lazer (optional) | 3 redundant WS, `real_time` channel, sub-50ms |
+| **DEX Data** | Hyperliquid API | WebSocket (`allMids`) + REST polling |
+| **AI Engine** | Vercel AI SDK + Workers AI | Streaming LLM with 6 structured Pyth/HL tools |
+| **API Layer** | REST + WebSocket | `/api/prices`, `/api/latency`, `/api/candles`, `/api/latency/history`, `/api/hip3`, `/ws/prices` |
+| **Security** | CSP + CORS + Origin validation + TruffleHog CI | Hardened headers, WS origin checks, 0 secrets in codebase |
 
 ### Frontend
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Framework** | React Router 7 (SSR) | Server-side rendered pages with typed loaders/actions |
-| **State Management** | Zustand | Client-side WebSocket connection + tick aggregation |
-| **Charts** | TradingView Lightweight Charts | Candlestick charts (analysis) + multi-line latency charts |
-| **UI Components** | shadcn/ui + Tailwind CSS 4 | Dark theme, responsive layout, accessible components |
+| **Framework** | React Router 7 (SSR) | Server-side rendered pages with typed loaders |
+| **State** | Zustand (granular selectors) | WS connection + 60fps tick aggregation |
+| **Charts** | TradingView Lightweight Charts | Candlestick + line charts (price + latency) |
+| **UI** | shadcn/ui + Tailwind CSS 4 | Dark theme, responsive, mobile-first |
 | **Typography** | Space Grotesk (self-hosted) | Zero external font requests via @fontsource |
-| **AI Chat** | @cloudflare/ai-chat + agents SDK | Lazy-mounted chat popup with retry-aware message fetching |
+| **AI Chat** | @cloudflare/ai-chat + agents SDK | Lazy-mounted popup with retry-aware fetch |
 
-### Infrastructure & DevOps
+### Infrastructure
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Deployment** | Cloudflare Workers (edge) | Global CDN, Smart Placement near Pyth/HL backends |
-| **Package Manager** | Bun | Fast installs, builds, and script execution |
+| **Deployment** | Cloudflare Workers + Smart Placement | Global CDN near Pyth/HL backends |
+| **Package Manager** | Bun | Fast installs, builds, scripts |
 | **Build** | Vite + React Router | SSR build with Cloudflare plugin |
-| **Type Safety** | TypeScript (strict) | End-to-end types from DO → loader → component |
-| **Testing** | Vitest + Playwright | Unit tests (Workers pool) + E2E scaffolding |
-| **Caching** | Cloudflare Edge | Immutable assets (1yr), HTML (5s + stale-while-revalidate) |
+| **Type Safety** | TypeScript (strict) | End-to-end types DO → loader → component |
+| **Secret Scanning** | TruffleHog | Git history + filesystem scan, 0 findings |
 
 ---
 
@@ -268,7 +292,7 @@ bun install
 bun dev
 ```
 
-Open `http://localhost:5173` — the dashboard will connect to live Pyth and Hyperliquid APIs.
+Open `http://localhost:5173` — connects live to Pyth and Hyperliquid APIs.
 
 ### Deploy to Cloudflare
 
@@ -276,7 +300,7 @@ Open `http://localhost:5173` — the dashboard will connect to live Pyth and Hyp
 bun run deploy
 ```
 
-This builds the React Router app and deploys the Worker + Durable Objects to Cloudflare's edge network.
+Builds React Router SSR app and deploys Worker + Durable Objects to Cloudflare edge.
 
 ### Enable Pyth Pro (Lazer) — Optional
 
@@ -297,85 +321,36 @@ The aggregator automatically detects the token and switches from Hermes to Lazer
 deltascope/
 ├── app/
 │   ├── components/
-│   │   ├── latency-chart.tsx    # Multi-line TradingView latency chart
-│   │   ├── oracle-chat.tsx      # AI chat popup (lazy-mounted)
-│   │   ├── tv-chart.tsx         # TradingView candlestick chart
-│   │   ├── markdown-renderer.tsx
+│   │   ├── historical-latency-chart.tsx  # 7-day latency chart with range selector
+│   │   ├── latency-chart.tsx             # Live multi-line TradingView latency chart
+│   │   ├── oracle-chat.tsx               # AI chat popup (lazy-mounted)
+│   │   ├── tv-chart.tsx                  # TradingView candlestick/line chart
 │   │   ├── mobile-nav.tsx
-│   │   └── ui/                  # shadcn/ui components
+│   │   └── ui/                           # shadcn/ui components
 │   ├── routes/
-│   │   ├── home.tsx             # Dashboard — price table, stats, HIP-3
-│   │   ├── analysis.tsx         # Ticker deep-dive with charts
-│   │   ├── predict.tsx          # Predict & Win — paper prediction game
-│   │   ├── latency.tsx          # Infrastructure latency monitor
-│   │   ├── developers.tsx       # API docs page
-│   │   └── chat.tsx             # Full-page chat view
-│   ├── schemas/
-│   │   └── prediction.ts        # Zod validation for predictions
+│   │   ├── home.tsx          # Dashboard — price table, stats, HIP-3, market hours widget
+│   │   ├── market-hours.tsx  # Global Market Hours — 31 exchanges, Gantt, overlaps
+│   │   ├── analysis.tsx      # Ticker deep-dive — leaderboard trader positioning
+│   │   ├── predict.tsx       # Predict & Win — paper prediction game
+│   │   ├── latency.tsx       # Infrastructure latency monitor + 7-day history
+│   │   ├── developers.tsx    # API docs
+│   │   └── chat.tsx          # Full-page chat
 │   ├── stores/
-│   │   └── price-store.ts       # Zustand store — WS connection, tick aggregation
-│   ├── root.tsx                 # App shell, meta tags, preconnect hints
-│   └── app.css                  # Tailwind + theme config
+│   │   └── price-store.ts    # Zustand — WS, 60fps tick aggregation, spike filter
+│   ├── root.tsx              # App shell, meta tags, preconnect hints
+│   └── app.css               # Tailwind + theme config
 ├── workers/
-│   ├── app.ts                   # Worker entry — routing, security headers, caching
-│   ├── price-aggregator.ts      # Core DO — Pyth + HL ingestion, fan-out, latency tracking
-│   ├── prediction-game.ts       # Prediction DO — SQLite, settlement alarms, leaderboard
-│   ├── chat.ts                  # AI chat agent (Workers AI + 6 Pyth tools)
-│   ├── chat-sessions.ts         # Chat session index DO
-│   ├── pyth-tools.ts            # 6 AI tools: search, prices, historical, TWAP, analysis
-│   └── data-proxy.ts            # Local dev data proxy shim
-├── wrangler.jsonc               # Cloudflare config — bindings, Smart Placement, compat
+│   ├── app.ts                # Worker entry — routing, security headers, caching
+│   ├── price-aggregator.ts   # Core DO — Pyth/HL ingestion, fan-out, SQLite persistence
+│   ├── prediction-game.ts    # Prediction DO — SQLite, settlement alarms, leaderboard
+│   ├── chat.ts               # AI chat agent (Workers AI + 6 Pyth tools)
+│   ├── chat-sessions.ts      # Chat session index DO
+│   ├── pyth-tools.ts         # 6 AI tools: search, prices, historical, TWAP, analysis
+│   └── data-proxy.ts         # Local dev data proxy shim
+├── wrangler.jsonc            # Cloudflare config — bindings, Smart Placement, compat
 ├── package.json
-└── LICENSE                      # Apache 2.0
+└── LICENSE                   # Apache 2.0
 ```
-
----
-
-## Predict & Win — How It Works
-
-The prediction game is a **paper trading system** that validates the prediction market concept before moving to real smart contracts on HyperEVM.
-
-### Settlement Flow
-
-```
-User clicks UP/DOWN
-       │
-       ▼
-┌──────────────────────────┐
-│  PredictionGame DO        │
-│  1. Validate wager        │
-│  2. Fetch entry price     │◀── PriceAggregator DO (/prices)
-│  3. Deduct points         │
-│  4. Store prediction      │
-│  5. Schedule alarm        │
-└──────────────────────────┘
-       │
-       ▼  (alarm fires after duration + 1s)
-┌──────────────────────────┐
-│  Settlement               │
-│  1. Fetch exit price      │◀── PriceAggregator DO (/prices)
-│  2. Compare direction     │
-│  3. Calculate payout      │
-│  4. Update points/streak  │
-│  5. Reschedule if pending │
-└──────────────────────────┘
-```
-
-### Scoring System
-
-| Action | Points |
-|--------|--------|
-| Starting balance | 1,000 |
-| Win | +wager amount |
-| Loss | -wager amount (already deducted at placement) |
-| Streak bonus (3+) | +10% per extra win beyond 2 |
-| Bankrupt reset | Reset to 500 |
-| Price unchanged | Full refund |
-| Oracle unavailable | Full refund |
-
-### SQLite Schema
-
-The `PredictionGame` DO uses two tables: `users` (id, display_name, points, wins, losses, streak, best_streak) and `predictions` (asset, direction, entry_price, target_time, wager, status, exit_price, points_delta). Settlement runs via Durable Object alarms every 5 seconds.
 
 ---
 
@@ -384,9 +359,11 @@ The `PredictionGame` DO uses two tables: `users` (id, display_name, points, wins
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/prices` | GET | Current merged state (Pyth + Hyperliquid) for all 8 assets |
-| `/api/latency` | GET | Latency history buffer + current source status |
+| `/api/latency` | GET | Live latency stats + 24h rolling history |
+| `/api/latency/history?range=1h\|6h\|24h\|3d\|7d` | GET | Historical P50/P95/P99 latency + source events |
+| `/api/candles?symbol=BTC&range=1h\|6h\|24h\|3d\|7d` | GET | Historical OHLC candles from SQLite |
 | `/api/hip3` | GET | HIP-3 ecosystem data (all permissionless DEXs) |
-| `/ws/prices` | WS | Real-time price stream (auto-reconnect, exponential backoff) |
+| `/ws/prices` | WS | Real-time price stream (16ms throttle, auto-reconnect) |
 
 ### Example: Fetch Current Prices
 
@@ -397,64 +374,76 @@ curl https://deltascope.site/api/prices | jq '.assets[] | {symbol, pythPrice, ma
 ```json
 {
   "symbol": "BTC",
-  "pythPrice": 66459.91,
-  "markPrice": 66484.50,
-  "oracleDiscrepancy": 0.037
+  "pythPrice": 69333.68,
+  "markPrice": 69305.00,
+  "oracleDiscrepancy": 0.041
 }
 ```
 
 ---
 
-## Performance Optimizations
+## Performance
 
 - **Triple Pyth source** — Dual Hermes WS + REST polling for lowest oracle delay
+- **Spike filter** — 1% deviation guard rejects bad oracle ticks before charting
 - **16ms broadcast coalescing** — Microtask-based throttle prevents WS storm
 - **Incremental JSON snapshots** — Only dirty assets recomputed per broadcast
+- **60fps React** — Zustand granular selectors + React.memo dirty-only re-renders
 - **Smart Placement** — Worker runs near Pyth/HL backends, not user edge
 - **Self-hosted fonts** — Zero external CSS or font requests
-- **Immutable asset caching** — Hashed filenames get `max-age=31536000`
-- **Preconnect hints** — Full TCP+TLS established during HTML parse
+- **Immutable asset caching** — Hashed filenames `max-age=31536000`
+- **Preconnect hints** — Full TCP+TLS during HTML parse
 - **HTML edge caching** — `max-age=5, stale-while-revalidate=30`
-- **Security-hardened CSP** — No `unsafe-eval`, strict connect-src whitelist
+
+### Measured Latency (Cloudflare edge → browser)
+
+| Route | TTFB | Total |
+|-------|------|-------|
+| `/` (home, warm DO) | ~50ms | ~100ms |
+| `/market-hours` | ~361ms | ~572ms |
+| `/analysis` | ~468ms | ~1.3s |
+| `/latency` | ~456ms | ~605ms |
+| `/api/prices` | ~580ms | ~580ms |
 
 ---
 
 ## Security
 
-- Content Security Policy with strict directives (no `unsafe-eval`)
+- Content Security Policy — no `unsafe-eval`, strict `connect-src` whitelist
 - `X-Frame-Options: DENY` — prevents clickjacking
-- `X-Content-Type-Options: nosniff` — prevents MIME sniffing
+- `X-Content-Type-Options: nosniff`
 - Origin validation on WebSocket upgrades
 - HttpOnly session cookies for chat
-- No secrets in client bundle
+- **TruffleHog scan: 0 verified secrets, 0 unverified secrets** across full git history + source files
 
 ---
 
 ## Roadmap
 
-DeltaScope is evolving from a price intelligence dashboard into a full prediction market platform on HyperEVM (Hyperliquid's EVM chain).
-
 ### Completed
-- [x] Real-time oracle & DEX price monitoring (8 assets)
+- [x] Real-time oracle & DEX price monitoring (8 assets, 60fps)
 - [x] Pyth Pro (Lazer) integration for sub-50ms updates
-- [x] Infrastructure latency monitoring with TradingView charts
+- [x] Spike filter — bad tick rejection on 1s chart
+- [x] Infrastructure latency monitoring + 7-day SQLite persistence
+- [x] P50/P95/P99 latency percentiles + source uptime event timeline
 - [x] AI chat assistant with 6 Pyth-powered tools
 - [x] Predict & Win paper prediction game with leaderboard
 - [x] Ticker analysis with top trader positioning data
+- [x] Global Market Hours — 31 exchanges, live Gantt chart
+- [x] Mobile-responsive UI (2-col stat cards, sticky columns, FAB)
 
 ### Next Up
 - [ ] On-chain prediction market contracts (Solidity on HyperEVM testnet)
 - [ ] Wallet connection (wagmi + viem for EVM)
 - [ ] Pyth confidence-aware settlement (refund on unreliable oracle data)
+- [ ] WebSocket RTT measurement (Browser ↔ Edge DO round-trip)
 - [ ] Dual oracle strategy: HyperEVM native precompile + Pyth confidence gates
 - [ ] CPMM-based dynamic pricing for prediction shares
-- [ ] Liquidity provider system with fee distribution
 
 ### Future
 - [ ] HyperEVM mainnet deployment
 - [ ] Multi-asset prediction pools
 - [ ] Early exit mechanism (sell positions before settlement)
-- [ ] Mobile-optimized trading experience
 - [ ] Tournament mode with prize pools
 
 ---
@@ -469,8 +458,10 @@ DeltaScope is evolving from a price intelligence dashboard into a full predictio
 
 - [Pyth Network](https://pyth.network/) — Real-time oracle price data
 - [Hyperliquid](https://hyperliquid.xyz/) — Perpetual DEX market data
-- [TradingView Lightweight Charts](https://github.com/nicehash/lightweight-charts) — Charting library
-- [Cloudflare Workers](https://workers.cloudflare.com/) — Edge runtime
-- [React Router](https://reactrouter.com/) — Full-stack framework
+- [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts) — Charting library
+- [Cloudflare Workers](https://workers.cloudflare.com/) — Edge runtime + Durable Objects
+- [React Router](https://reactrouter.com/) — Full-stack SSR framework
+- [loris.tools](https://loris.tools/market-hours) — Market hours reference data
+- [markethours.io](https://markethours.io/markets) — Exchange UTC times verification
 
 Built by [@0xPilotSB](https://github.com/0xPilotSB)
